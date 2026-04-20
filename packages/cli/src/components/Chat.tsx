@@ -20,7 +20,7 @@ export const Chat: React.FC<Props> = ({ agent, configPath }) => {
   const { exit } = useApp();
   const [input, setInput] = useState("");
   const [output, setOutput] = useState<OutputLine[]>([
-    { type: "info", text: `microagent v0.1.0 — provider: ${agent.provider.name} — model: ${agent.provider.currentModel}` },
+    { type: "info", text: `microagent v0.1.0 — ${agent.provider.name}/${agent.provider.currentModel} — providers: ${agent.providerNames.join(", ")}` },
     { type: "info", text: `tools: ${agent.tools.list().join(", ") || "(none)"}` },
     { type: "info", text: 'Type your message. Press Ctrl+C to exit. Commands: /stats /tools /models /model /image /quit\n' },
   ]);
@@ -53,16 +53,28 @@ export const Chat: React.FC<Props> = ({ agent, configPath }) => {
         return;
       }
       if (value.trim() === "/models") {
-        addLine({ type: "info", text: "Fetching models..." });
+        addLine({ type: "info", text: "Fetching models from all providers..." });
         try {
-          const models = await agent.provider.listModels();
+          const models = await agent.listAllModels();
           if (!models.length) {
             addLine({ type: "info", text: "No models found." });
           } else {
-            addLine({ type: "info", text: `Available models (${models.length}):` });
+            // Group by provider
+            const grouped = new Map<string, string[]>();
             for (const m of models) {
-              addLine({ type: "info", text: `  ${m.id}` });
+              const list = grouped.get(m.provider) ?? [];
+              list.push(m.id);
+              grouped.set(m.provider, list);
             }
+            for (const [prov, ids] of grouped) {
+              const active = prov === agent.provider.name ? " (active)" : "";
+              addLine({ type: "info", text: `\n  ${prov}${active}:` });
+              for (const id of ids) {
+                const current = prov === agent.provider.name && id === agent.provider.currentModel ? " ←" : "";
+                addLine({ type: "info", text: `    ${prov}/${id}${current}` });
+              }
+            }
+            addLine({ type: "info", text: `\n${models.length} model(s) across ${grouped.size} provider(s).` });
           }
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err);
@@ -70,27 +82,38 @@ export const Chat: React.FC<Props> = ({ agent, configPath }) => {
         }
         return;
       }
-      // /model <name> — switch the active model
+      // /model <provider/model> or /model <model> — switch the active model
       if (value.trim().startsWith("/model ")) {
-        const newModel = value.trim().slice(7).trim();
-        if (!newModel) {
-          addLine({ type: "info", text: `Current model: ${agent.provider.currentModel}` });
+        const spec = value.trim().slice(7).trim();
+        if (!spec) {
+          addLine({ type: "info", text: `Current: ${agent.provider.name}/${agent.provider.currentModel}` });
           return;
         }
-        agent.setModel(newModel);
-        addLine({ type: "info", text: `Switched to model: ${newModel}` });
-        // Persist to config file if available
-        if (configPath) {
-          try {
-            const raw = existsSync(configPath) ? JSON.parse(readFileSync(configPath, "utf-8")) as MicroagentConfig : {} as MicroagentConfig;
-            raw.provider = { ...raw.provider, model: newModel };
-            mkdirSync(dirname(configPath), { recursive: true });
-            writeFileSync(configPath, JSON.stringify(raw, null, 2) + "\n");
-            addLine({ type: "info", text: `Config saved to ${configPath}` });
-          } catch (err) {
-            const msg = err instanceof Error ? err.message : String(err);
-            addLine({ type: "error", text: `Failed to save config: ${msg}` });
+        try {
+          const { provider: provName, model: newModel } = agent.setModel(spec);
+          addLine({ type: "info", text: `Switched to ${provName}/${newModel}` });
+          // Persist to config file if available
+          if (configPath) {
+            try {
+              const raw = existsSync(configPath) ? JSON.parse(readFileSync(configPath, "utf-8")) as MicroagentConfig : {} as MicroagentConfig;
+              if (raw.providers?.length) {
+                const pc = raw.providers.find((p) => (p.name ?? p.type) === provName || p.type === provName);
+                if (pc) pc.model = newModel;
+                raw.activeProvider = provName;
+              } else if (raw.provider) {
+                raw.provider.model = newModel;
+              }
+              mkdirSync(dirname(configPath), { recursive: true });
+              writeFileSync(configPath, JSON.stringify(raw, null, 2) + "\n");
+              addLine({ type: "info", text: `Config saved to ${configPath}` });
+            } catch (err) {
+              const msg = err instanceof Error ? err.message : String(err);
+              addLine({ type: "error", text: `Failed to save config: ${msg}` });
+            }
           }
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          addLine({ type: "error", text: msg });
         }
         return;
       }

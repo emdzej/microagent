@@ -53,10 +53,10 @@ export async function createServer(opts: ServerOptions) {
   // ── Stats ──────────────────────────────────────────────────────
   app.get("/stats", async () => agent.stats.summary);
 
-  // ── List available models ──────────────────────────────────────
+  // ── List available models (all providers) ───────────────────────
   app.get("/models", async () => {
-    const models = await agent.provider.listModels();
-    return { models };
+    const models = await agent.listAllModels();
+    return { models, activeProvider: agent.provider.name, activeModel: agent.provider.currentModel };
   });
 
   // ── Get / set current model ───────────────────────────────────
@@ -75,14 +75,20 @@ export async function createServer(opts: ServerOptions) {
     },
   }, async (request) => {
     const { model } = request.body;
-    agent.setModel(model);
+    const { provider: provName, model: newModel } = agent.setModel(model);
 
     // Persist to config file if available
     const configPath = opts.configPath;
     if (configPath) {
       try {
         const raw = existsSync(configPath) ? JSON.parse(readFileSync(configPath, "utf-8")) as MicroagentConfig : {} as MicroagentConfig;
-        raw.provider = { ...raw.provider, model };
+        if (raw.providers?.length) {
+          const pc = raw.providers.find((p: { name?: string; type: string }) => (p.name ?? p.type) === provName || p.type === provName);
+          if (pc) pc.model = newModel;
+          raw.activeProvider = provName;
+        } else if (raw.provider) {
+          raw.provider.model = newModel;
+        }
         mkdirSync(dirname(configPath), { recursive: true });
         writeFileSync(configPath, JSON.stringify(raw, null, 2) + "\n");
       } catch {
@@ -90,7 +96,7 @@ export async function createServer(opts: ServerOptions) {
       }
     }
 
-    return { model, persisted: !!configPath };
+    return { provider: provName, model: newModel, persisted: !!configPath };
   });
 
   // ── Chat (non-streaming) ───────────────────────────────────────

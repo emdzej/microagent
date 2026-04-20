@@ -12,10 +12,11 @@ export type {
   ProviderConfig,
   LLMProvider,
   ModelInfo,
+  ProviderModelInfo,
   McpServerConfig,
   MicroagentConfig,
 } from "./types.js";
-export { getTextContent } from "./types.js";
+export { getTextContent, resolveProviders, resolveActiveProvider } from "./types.js";
 
 export { Agent } from "./agent.js";
 export type { AgentEvents } from "./agent.js";

@@ -5,7 +5,7 @@ import { render } from "ink";
 import { startChat } from "./app.js";
 import { startServer } from "@microagent/server";
 import type { MicroagentConfig } from "@microagent/core";
-import { Agent, paths, listModelsForProvider } from "@microagent/core";
+import { Agent, paths, listModelsForProvider, resolveProviders } from "@microagent/core";
 import { readFileSync, existsSync, writeFileSync, mkdirSync } from "node:fs";
 import { resolve, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -154,20 +154,34 @@ addProviderOpts(
     .description("List available models for a provider")
 ).action(async (opts) => {
   const { config } = loadConfig(opts);
+  const providers = resolveProviders(config);
+  if (!providers.length) {
+    console.error("No providers configured.");
+    process.exit(1);
+  }
   try {
-    console.log(`Fetching models from ${config.provider.type}...\n`);
-    const models = await listModelsForProvider(
-      config.provider.type,
-      { baseUrl: config.provider.baseUrl, apiKey: config.provider.apiKey }
-    );
-    if (!models.length) {
-      console.log("No models found.");
-      return;
+    let total = 0;
+    for (const pc of providers) {
+      const name = pc.name ?? pc.type;
+      console.log(`\n${name}:`);
+      try {
+        const models = await listModelsForProvider(
+          pc.type,
+          { baseUrl: pc.baseUrl, apiKey: pc.apiKey }
+        );
+        if (!models.length) {
+          console.log("  (no models found)");
+        } else {
+          for (const m of models) {
+            console.log(`  ${name}/${m.id}`);
+          }
+          total += models.length;
+        }
+      } catch (err) {
+        console.error(`  Error: ${err instanceof Error ? err.message : String(err)}`);
+      }
     }
-    for (const m of models) {
-      console.log(`  ${m.id}`);
-    }
-    console.log(`\n${models.length} model(s) available.`);
+    console.log(`\n${total} model(s) across ${providers.length} provider(s).`);
   } catch (err) {
     console.error(`Failed to list models: ${err instanceof Error ? err.message : String(err)}`);
     process.exit(1);

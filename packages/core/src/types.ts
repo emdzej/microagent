@@ -73,10 +73,14 @@ export interface ToolPlugin {
 
 /** Provider configuration */
 export interface ProviderConfig {
+  /** Provider type: ollama | github-copilot | openai | custom */
   type: string;
+  /** Default model for this provider */
   model: string;
   baseUrl?: string;
   apiKey?: string;
+  /** Optional display name (defaults to `type`) */
+  name?: string;
 }
 
 /** Model metadata returned by provider */
@@ -110,9 +114,39 @@ export interface McpServerConfig {
   url?: string;
 }
 
+/** Model info with provider context */
+export interface ProviderModelInfo extends ModelInfo {
+  provider: string;
+}
+
 /** Full application config */
 export interface MicroagentConfig {
-  provider: ProviderConfig;
+  /** @deprecated Use `providers` array instead. Kept for backward compatibility. */
+  provider?: ProviderConfig;
+  /** Multiple provider configurations */
+  providers?: ProviderConfig[];
+  /** Name/type of the active provider (defaults to first in array) */
+  activeProvider?: string;
   systemPrompt?: string;
   mcpServers?: McpServerConfig[];
+}
+
+/** Normalize config: ensure `providers` array is populated from legacy `provider` field */
+export function resolveProviders(config: MicroagentConfig): ProviderConfig[] {
+  if (config.providers?.length) return config.providers;
+  if (config.provider) return [config.provider];
+  return [];
+}
+
+/** Get the active provider config */
+export function resolveActiveProvider(config: MicroagentConfig): ProviderConfig {
+  const providers = resolveProviders(config);
+  if (!providers.length) throw new Error("No providers configured");
+  if (config.activeProvider) {
+    const found = providers.find(
+      (p) => (p.name ?? p.type) === config.activeProvider || p.type === config.activeProvider
+    );
+    if (found) return found;
+  }
+  return providers[0];
 }

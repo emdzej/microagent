@@ -13,6 +13,7 @@ type Step =
   | "fetchModels"
   | "model"
   | "modelManual"
+  | "addAnotherProvider"
   | "systemPrompt"
   | "addMcp"
   | "mcpName"
@@ -56,6 +57,7 @@ export const ConfigWizard: React.FC<Props> = ({ outputPath: initialOutput }) => 
   const [model, setModel] = useState("");
   const [baseUrl, setBaseUrl] = useState("");
   const [apiKey, setApiKey] = useState("");
+  const [configuredProviders, setConfiguredProviders] = useState<Array<{ type: string; model: string; baseUrl?: string; apiKey?: string }>>([]);
   const [systemPrompt, setSystemPrompt] = useState(
     "You are a helpful coding assistant. Be concise and precise. Use the available tools when needed."
   );
@@ -77,13 +79,15 @@ export const ConfigWizard: React.FC<Props> = ({ outputPath: initialOutput }) => 
   }
 
   function saveConfig() {
+    const allProviders = [...configuredProviders];
     const config: MicroagentConfig = {
-      provider: {
-        type: provider,
-        model,
-        ...(baseUrl && baseUrl !== BASE_URL_DEFAULTS[provider] ? { baseUrl } : {}),
-        ...(apiKey ? { apiKey } : {}),
-      },
+      providers: allProviders.map((p) => ({
+        type: p.type,
+        model: p.model,
+        ...(p.baseUrl && p.baseUrl !== BASE_URL_DEFAULTS[p.type] ? { baseUrl: p.baseUrl } : {}),
+        ...(p.apiKey ? { apiKey: p.apiKey } : {}),
+      })),
+      activeProvider: allProviders[0]?.type,
       systemPrompt,
       mcpServers: mcpServers.length ? mcpServers : undefined,
     };
@@ -231,7 +235,8 @@ export const ConfigWizard: React.FC<Props> = ({ outputPath: initialOutput }) => 
               setStep("modelManual");
             } else {
               setModel(val);
-              setStep("systemPrompt");
+              setConfiguredProviders((prev) => [...prev, { type: provider, model: val, baseUrl, apiKey }]);
+              setStep("addAnotherProvider");
             }
           }}
         />
@@ -251,9 +256,38 @@ export const ConfigWizard: React.FC<Props> = ({ outputPath: initialOutput }) => 
           defaultValue={model}
           placeholder={MODEL_SUGGESTIONS[provider]}
           onSubmit={(val) => {
-            setModel(val || MODEL_SUGGESTIONS[provider]);
-            setStep("systemPrompt");
+            const m = val || MODEL_SUGGESTIONS[provider];
+            setModel(m);
+            setConfiguredProviders((prev) => [...prev, { type: provider, model: m, baseUrl, apiKey }]);
+            setStep("addAnotherProvider");
           }}
+        />
+      </Box>
+    );
+  }
+
+  // ── Add another provider? ───────────────────────────────────────
+  if (step === "addAnotherProvider") {
+    return (
+      <Box flexDirection="column" gap={1} padding={1}>
+        <Text bold color="cyan">Providers configured ({configuredProviders.length})</Text>
+        {configuredProviders.map((p, i) => (
+          <Text key={i} color="green">  - {p.type} → {p.model}</Text>
+        ))}
+        <Text>Add another provider? (Y/n)</Text>
+        <ConfirmInput
+          defaultChoice="cancel"
+          onConfirm={() => {
+            // Reset current provider state for next provider
+            setProvider("");
+            setModel("");
+            setBaseUrl("");
+            setApiKey("");
+            setModels([]);
+            setFetchError("");
+            setStep("provider");
+          }}
+          onCancel={() => setStep("systemPrompt")}
         />
       </Box>
     );
