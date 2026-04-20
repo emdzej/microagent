@@ -8,8 +8,9 @@ A minimal AI agent built in TypeScript. A reference implementation showing how t
 
 - **Interactive CLI** (Ink) and **Web UI** (Svelte 5 + Tailwind, light theme)
 - **Any OpenAI-compatible LLM** — Ollama, GitHub Copilot, OpenAI, Groq, Together, LM Studio, vLLM...
+- **Multiple providers** — configure several providers at once, list models across all, switch with `provider/model` syntax
 - **Multimodal** — attach images via CLI (`/image`), web UI (upload/paste), or API
-- **Runtime model switching** — `/model <name>` persists to config file
+- **Runtime model switching** — `/model provider/model` switches provider and model, persists to config
 - **Plugin-based tool system** — built-in tools and MCP servers register through the same registry
 - **MCP client** — connect to any MCP server via stdio or HTTP
 - **Streaming** — SSE streaming in both CLI and web UI
@@ -68,8 +69,8 @@ pnpm serve
 pnpm ui
 pnpm ui -- --no-open    # skip auto-open
 
-# List available models for a provider
-pnpm chat -- models -p github-copilot
+# List available models for all configured providers
+pnpm chat -- models
 
 # One-shot query (no interactive UI)
 pnpm ask 'explain what a monad is'
@@ -111,9 +112,10 @@ The following slash commands work in both the **CLI** and **Web UI**:
 |---|---|
 | `/stats` | Show token usage, request count, and tool call stats |
 | `/tools` | List all registered tools (built-in + MCP) |
-| `/models` | Fetch and display available models from the provider |
-| `/model <name>` | Switch to a different model (persists to config file) |
-| `/model` | Show the currently active model |
+| `/models` | Fetch and display available models from all configured providers |
+| `/model <provider/model>` | Switch to a model (and its provider). e.g. `/model openai/gpt-4o` |
+| `/model <name>` | Switch model on the current provider |
+| `/model` | Show the currently active provider and model |
 | `/image <path-or-url>` | Queue an image for the next message (CLI only) |
 | `/clear` | Clear chat history (Web UI only) |
 | `/help` | Show available commands (Web UI only) |
@@ -139,9 +141,10 @@ The wizard steps:
 2. **Model** — enter model name (sensible default pre-filled per provider)
 3. **Base URL** — only prompted for custom endpoints
 4. **API Key** — prompted for providers that need auth (can be left empty to use env vars at runtime)
-5. **System prompt** — customize or keep the default
-6. **MCP Servers** — optionally add one or more MCP servers (stdio or HTTP)
-7. **Output path** — confirm where to save the config file
+5. **Add another provider?** — repeat steps 1-4 to configure additional providers
+6. **System prompt** — customize or keep the default
+7. **MCP Servers** — optionally add one or more MCP servers (stdio or HTTP)
+8. **Output path** — confirm where to save the config file
 
 Then run with the generated config:
 
@@ -187,10 +190,12 @@ Config file (no API key needed):
 
 ```json
 {
-  "provider": {
-    "type": "github-copilot",
-    "model": "gpt-4o"
-  }
+  "providers": [
+    {
+      "type": "github-copilot",
+      "model": "gpt-4o"
+    }
+  ]
 }
 ```
 
@@ -225,11 +230,22 @@ Create a config file (or use `pnpm wizard`):
 
 ```json
 {
-  "provider": {
-    "type": "ollama",
-    "model": "llama3.2",
-    "baseUrl": "http://localhost:11434/v1"
-  },
+  "providers": [
+    {
+      "type": "ollama",
+      "model": "llama3.2"
+    },
+    {
+      "type": "openai",
+      "model": "gpt-4o",
+      "apiKey": "sk-..."
+    },
+    {
+      "type": "github-copilot",
+      "model": "gpt-4o"
+    }
+  ],
+  "activeProvider": "ollama",
   "systemPrompt": "You are a helpful coding assistant.",
   "mcpServers": [
     {
@@ -244,6 +260,17 @@ Create a config file (or use `pnpm wizard`):
       "url": "http://localhost:4000/mcp"
     }
   ]
+}
+```
+
+The legacy single-provider format is still supported for backward compatibility:
+
+```json
+{
+  "provider": {
+    "type": "ollama",
+    "model": "llama3.2"
+  }
 }
 ```
 
@@ -308,9 +335,9 @@ Start with `pnpm serve` or `pnpm ui`.
 | `GET` | `/health` | Provider, tool count, uptime |
 | `GET` | `/tools` | All tool definitions |
 | `GET` | `/stats` | Token/request/tool usage |
-| `GET` | `/models` | List available models from the provider |
+| `GET` | `/models` | List available models from all configured providers |
 | `GET` | `/model` | Get current model and provider |
-| `POST` | `/model` | Switch model `{ model }` -> `{ model, persisted }` |
+| `POST` | `/model` | Switch model `{ model: "provider/model" }` -> `{ provider, model, persisted }` |
 | `POST` | `/chat` | Sync chat `{ message, images? }` -> `{ response, toolCalls, stats }` |
 | `POST` | `/chat/stream` | SSE stream — events: `delta`, `tool_call`, `tool_result`, `complete`, `error` |
 
@@ -409,11 +436,13 @@ If Ollama runs on your host, update `microagent.config.json` to use the Docker-a
 
 ```json
 {
-  "provider": {
-    "type": "ollama",
-    "model": "llama3.2",
-    "baseUrl": "http://host.docker.internal:11434/v1"
-  }
+  "providers": [
+    {
+      "type": "ollama",
+      "model": "llama3.2",
+      "baseUrl": "http://host.docker.internal:11434/v1"
+    }
+  ]
 }
 ```
 

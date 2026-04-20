@@ -27,6 +27,7 @@ This document explains the internals of microagent — how LLM providers are abs
   - [Multimodal Messages](#multimodal-messages)
   - [Conversation State](#conversation-state)
 - [Configuration and Paths](#configuration-and-paths)
+- [Multiple Providers](#multiple-providers)
 - [Runtime Model Switching](#runtime-model-switching)
 - [HTTP API and Web UI](#http-api-and-web-ui)
 
@@ -44,20 +45,20 @@ graph TB
 
     subgraph "@microagent/core"
         AGENT["Agent Loop"]
-        PROVIDER["OpenAICompatibleProvider"]
+        PROVIDERS["Provider Map\n(multiple OpenAICompatibleProvider)"]
         REGISTRY["ToolRegistry"]
         MCP["McpManager"]
         STATS["UsageStats"]
     end
 
     subgraph "External Services"
-        LLM["LLM API\n(Ollama / Copilot / OpenAI / ...)"]
+        LLM["LLM APIs\n(Ollama / Copilot / OpenAI / ...)"]
         MCP_SERVER["MCP Servers\n(stdio / HTTP)"]
     end
 
     CLI --> AGENT
     WEB --> API --> AGENT
-    AGENT --> PROVIDER --> LLM
+    AGENT --> PROVIDERS --> LLM
     AGENT --> REGISTRY
     REGISTRY --> MCP
     MCP --> MCP_SERVER
@@ -569,12 +570,26 @@ When loading configuration, the CLI checks in order:
 
 ### Config File Format
 
+microagent supports configuring multiple providers simultaneously. The `providers` array holds all provider configurations, and `activeProvider` selects which one is used by default:
+
 ```json
 {
-  "provider": {
-    "type": "github-copilot",
-    "model": "gpt-4o"
-  },
+  "providers": [
+    {
+      "type": "ollama",
+      "model": "llama3.2"
+    },
+    {
+      "type": "github-copilot",
+      "model": "gpt-4o"
+    },
+    {
+      "type": "openai",
+      "model": "gpt-4o",
+      "apiKey": "sk-..."
+    }
+  ],
+  "activeProvider": "ollama",
   "systemPrompt": "You are a helpful coding assistant.",
   "mcpServers": [
     {
@@ -587,33 +602,104 @@ When loading configuration, the CLI checks in order:
 }
 ```
 
+The legacy single-provider format (`"provider": {...}`) is still supported for backward compatibility. The `resolveProviders()` and `resolveActiveProvider()` helpers in `types.ts` normalize both formats.
+
+---
+
+## Multiple Providers
+
+microagent supports configuring multiple LLM providers simultaneously. All providers are initialized eagerly at startup, and their models can be listed and switched between at runtime.
+
+### Architecture
+
+```mermaid
+graph TB
+    CONFIG["MicroagentConfig\nproviders: [ollama, copilot, openai]\nactiveProvider: ollama"]
+    AGENT["Agent"]
+    
+    subgraph "Provider Map"
+        OLLAMA["ollama\nOpenAICompatibleProvider"]
+        COPILOT["github-copilot\nOpenAICompatibleProvider"]
+        OPENAI["openai\nOpenAICompatibleProvider"]
+    end
+    
+    ACTIVE["Active Provider\n(pointer)"]
+    
+    CONFIG --> AGENT
+    AGENT --> OLLAMA
+    AGENT --> COPILOT
+    AGENT --> OPENAI
+    ACTIVE -.-> OLLAMA
+```
+
+**Key implementation details** (`packages/core/src/agent.ts`):
+
+1. The `Agent` constructor creates all providers from the `providers` array and stores them in a `Map<string, LLMProvider>`.
+2. The `_provider` field points to the currently active provider — all `chat()` calls go through this.
+3. `listAllModels()` queries all providers in parallel using `Promise.allSettled()`, so one failing provider doesn't block the others. Results include a `provider` field for grouping.
+4. `setModel("provider/model")` switches both the active provider and model. `setModel("model")` switches just the model on the current provider.
+
+### Model Specification Format
+
+When switching models, two formats are supported:
+
+| Format | Example | Behavior |
+|---|---|---|
+| `provider/model` | `openai/gpt-4o-mini` | Switch to the named provider and set the model |
+| `model` | `gpt-4o-mini` | Set the model on the current active provider |
+
+The `/models` command displays all models grouped by provider in `provider/model` format, with the current model marked:
+
+```
+  ollama (active):
+    ollama/llama3.2 ←
+    ollama/mistral
+    ollama/qwen2.5-coder:7b
+
+  openai:
+    openai/gpt-4o
+    openai/gpt-4o-mini
+
+12 model(s) across 2 provider(s).
+```
+
+### Config Normalization
+
+Two helper functions in `types.ts` handle backward compatibility:
+
+- `resolveProviders(config)` — returns `config.providers` if present, otherwise wraps `config.provider` into an array
+- `resolveActiveProvider(config)` — finds the active provider by matching `activeProvider` against provider names/types, defaulting to the first
+
 ---
 
 ## Runtime Model Switching
 
-The active model can be changed at runtime without restarting the agent. The `LLMProvider` interface exposes `currentModel` (getter) and `setModel()` (setter), and the `Agent` class passes these through.
+The active model can be changed at runtime without restarting the agent. With multiple providers configured, switching models can also switch the active provider.
 
 ```mermaid
 sequenceDiagram
     participant User
     participant CLI/Web as CLI or Web UI
     participant Agent
-    participant Provider as OpenAICompatibleProvider
+    participant Providers as Provider Map
     participant Config as Config File
 
-    User->>CLI/Web: /model gpt-4o-mini
-    CLI/Web->>Agent: setModel("gpt-4o-mini")
-    Agent->>Provider: setModel("gpt-4o-mini")
-    Provider->>Provider: _model = "gpt-4o-mini"
-    CLI/Web->>Config: Read JSON, update provider.model, write back
-    CLI/Web-->>User: "Switched to model: gpt-4o-mini"
-    Note over Provider: Next chat() call uses new model
+    User->>CLI/Web: /model openai/gpt-4o-mini
+    CLI/Web->>Agent: setModel("openai/gpt-4o-mini")
+    Agent->>Agent: Parse "openai" / "gpt-4o-mini"
+    Agent->>Providers: Look up "openai" provider
+    Agent->>Agent: Set active provider to "openai"
+    Agent->>Providers: openai.setModel("gpt-4o-mini")
+    CLI/Web->>Config: Update providers[].model + activeProvider, write back
+    CLI/Web-->>User: "Switched to openai/gpt-4o-mini"
+    Note over Agent: Next chat() call uses openai provider with gpt-4o-mini
 ```
 
 **Key design decisions:**
 
 - **Optimistic switching** — the model is changed immediately without validation. If the model doesn't exist, the next LLM call will fail with a clear error from the provider.
-- **Config persistence** — if a config file was used to start the agent, the `/model` command writes the new model back to that file. If the agent was started with CLI flags (no config file), the change is session-only.
+- **Provider/model syntax** — `provider/model` switches both; bare `model` switches only the model on the current provider.
+- **Config persistence** — if a config file was used, the `/model` command updates both the provider's model in the `providers` array and the `activeProvider` field. Legacy single-provider configs update `provider.model` instead.
 - **The `loadConfig()` function** returns both the parsed config and the resolved file path (`configPath`). This path is threaded through to the CLI `Chat` component and the server's `POST /model` endpoint so both can persist changes.
 
 ---
@@ -688,8 +774,8 @@ The web UI supports the same slash commands as the CLI, handled client-side befo
 | `/help` | Show available commands |
 | `/stats` | Fetch and display token usage stats |
 | `/tools` | List registered tools with descriptions |
-| `/models` | Fetch and list available models |
-| `/model <name>` | Switch active model (via `POST /model`) |
+| `/models` | Fetch and list available models from all providers |
+| `/model <provider/model>` | Switch active model and provider (via `POST /model`) |
 | `/clear` | Clear chat message history |
 
 Commands starting with `/` are intercepted in the `send()` function and resolved using the existing API endpoints — they never reach the LLM.
