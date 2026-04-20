@@ -1,11 +1,33 @@
 // ── Core types for microagent ──
 
+/** Content part for multimodal messages */
+export interface TextPart {
+  type: "text";
+  text: string;
+}
+
+export interface ImagePart {
+  type: "image_url";
+  image_url: { url: string }; // data:image/...;base64,... or https://...
+}
+
+export type ContentPart = TextPart | ImagePart;
+
 /** A single message in a conversation */
 export interface Message {
   role: "system" | "user" | "assistant" | "tool";
-  content: string;
+  content: string | ContentPart[];
   toolCallId?: string;
   toolCalls?: ToolCall[];
+}
+
+/** Extract text content from a message (handles both string and ContentPart[]) */
+export function getTextContent(message: Message): string {
+  if (typeof message.content === "string") return message.content;
+  return message.content
+    .filter((p): p is TextPart => p.type === "text")
+    .map((p) => p.text)
+    .join("");
 }
 
 /** A tool call requested by the model */
@@ -67,6 +89,10 @@ export interface ModelInfo {
 /** LLM Provider interface */
 export interface LLMProvider {
   readonly name: string;
+  /** Currently active model identifier */
+  readonly currentModel: string;
+  /** Switch the active model at runtime */
+  setModel(model: string): void;
   chat(
     messages: Message[],
     tools?: ToolDefinition[],

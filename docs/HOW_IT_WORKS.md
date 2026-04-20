@@ -24,8 +24,10 @@ This document explains the internals of microagent — how LLM providers are abs
   - [How MCP Tools Become Plugins](#how-mcp-tools-become-plugins)
 - [Message Protocol](#message-protocol)
   - [Message Roles](#message-roles)
+  - [Multimodal Messages](#multimodal-messages)
   - [Conversation State](#conversation-state)
 - [Configuration and Paths](#configuration-and-paths)
+- [Runtime Model Switching](#runtime-model-switching)
 - [HTTP API and Web UI](#http-api-and-web-ui)
 
 ---
@@ -148,15 +150,19 @@ classDiagram
     class LLMProvider {
         <<interface>>
         +name: string
+        +currentModel: string
+        +setModel(model): void
         +chat(messages, tools, onDelta): Promise
         +listModels(): Promise
     }
 
     class OpenAICompatibleProvider {
-        -model: string
+        -_model: string
         -baseUrl: string
         -baseHeaders: Record
         -getApiKey?: () => Promise~string~
+        +currentModel: string
+        +setModel(model): void
         +resolveHeaders(): Promise
         +listModels(): Promise
         +chat(messages, tools, onDelta): Promise
@@ -488,6 +494,38 @@ microagent uses four message roles, matching the OpenAI protocol:
 | `assistant` | Model response (may include tool calls) | "Let me check that for you." + tool_calls |
 | `tool` | Result of a tool execution | "file1.txt\nfile2.txt" |
 
+### Multimodal Messages
+
+Messages support both text-only and multimodal content. The `Message.content` field is typed as `string | ContentPart[]`:
+
+```typescript
+// Text-only message
+{ role: "user", content: "What files are in /tmp?" }
+
+// Multimodal message with images
+{
+  role: "user",
+  content: [
+    { type: "text", text: "What's in this image?" },
+    { type: "image_url", image_url: { url: "data:image/png;base64,..." } }
+  ]
+}
+```
+
+Images can be provided as:
+- **Data URIs** (`data:image/png;base64,...`) — used when reading local files or pasting from clipboard
+- **HTTP URLs** (`https://example.com/image.png`) — passed through to the LLM provider
+
+The `getTextContent()` helper extracts text from either format, used internally when only the text portion is needed. The provider's `toOpenAIMessages()` passes content arrays through as-is — the OpenAI API format natively supports this structure.
+
+**How images flow through the system:**
+
+| Interface | How images are provided |
+|---|---|
+| CLI | `/image <path-or-url>` queues an image, sent with the next message |
+| Web UI | Upload button, clipboard paste (Ctrl+V), or drag & drop |
+| HTTP API | `images` array in POST `/chat` or `/chat/stream` body |
+
 ### Conversation State
 
 Messages accumulate in the agent's `messages[]` array throughout the session. A typical multi-turn conversation with tool use looks like:
@@ -551,6 +589,35 @@ When loading configuration, the CLI checks in order:
 
 ---
 
+## Runtime Model Switching
+
+The active model can be changed at runtime without restarting the agent. The `LLMProvider` interface exposes `currentModel` (getter) and `setModel()` (setter), and the `Agent` class passes these through.
+
+```mermaid
+sequenceDiagram
+    participant User
+    participant CLI/Web as CLI or Web UI
+    participant Agent
+    participant Provider as OpenAICompatibleProvider
+    participant Config as Config File
+
+    User->>CLI/Web: /model gpt-4o-mini
+    CLI/Web->>Agent: setModel("gpt-4o-mini")
+    Agent->>Provider: setModel("gpt-4o-mini")
+    Provider->>Provider: _model = "gpt-4o-mini"
+    CLI/Web->>Config: Read JSON, update provider.model, write back
+    CLI/Web-->>User: "Switched to model: gpt-4o-mini"
+    Note over Provider: Next chat() call uses new model
+```
+
+**Key design decisions:**
+
+- **Optimistic switching** — the model is changed immediately without validation. If the model doesn't exist, the next LLM call will fail with a clear error from the provider.
+- **Config persistence** — if a config file was used to start the agent, the `/model` command writes the new model back to that file. If the agent was started with CLI flags (no config file), the change is session-only.
+- **The `loadConfig()` function** returns both the parsed config and the resolved file path (`configPath`). This path is threaded through to the CLI `Chat` component and the server's `POST /model` endpoint so both can persist changes.
+
+---
+
 ## HTTP API and Web UI
 
 The server package wraps the agent in Fastify routes:
@@ -565,6 +632,7 @@ graph LR
         HEALTH["GET /health"]
         TOOLS["GET /tools"]
         MODELS["GET /models"]
+        MODEL["GET|POST /model"]
         STATS["GET /stats"]
         CHAT["POST /chat"]
         STREAM["POST /chat/stream (SSE)"]
@@ -578,6 +646,7 @@ graph LR
     BROWSER --> HEALTH
     BROWSER --> TOOLS
     BROWSER --> MODELS
+    BROWSER --> MODEL --> AGENT
     BROWSER --> STATS
     BROWSER --> CHAT --> AGENT
     BROWSER --> STREAM --> AGENT
@@ -609,3 +678,22 @@ data: {"response":"The file contains: Hello, world!","stats":{...}}
 ```
 
 The Svelte web UI (`@microagent/web`) consumes this SSE stream via a `fetchEventSource` client in `lib/api.ts`, rendering text as it arrives and showing tool calls in an expandable panel.
+
+### Web UI Slash Commands
+
+The web UI supports the same slash commands as the CLI, handled client-side before sending to the server:
+
+| Command | Action |
+|---|---|
+| `/help` | Show available commands |
+| `/stats` | Fetch and display token usage stats |
+| `/tools` | List registered tools with descriptions |
+| `/models` | Fetch and list available models |
+| `/model <name>` | Switch active model (via `POST /model`) |
+| `/clear` | Clear chat message history |
+
+Commands starting with `/` are intercepted in the `send()` function and resolved using the existing API endpoints — they never reach the LLM.
+
+### Web UI Design
+
+The web UI uses a **light theme** — white background with zinc-50 accents, zinc-200 borders, and blue-600 for primary actions. Messages are styled with subtle colored backgrounds: blue-50 for user, zinc-50 for assistant, amber-50 for tool calls, and red-50 for errors. The header displays the provider name and current model (clickable to open a model picker dropdown).

@@ -45,15 +45,37 @@ export async function fetchStats(): Promise<Stats> {
   return res.json();
 }
 
-export function streamChat(message: string, callbacks: StreamCallbacks): () => void {
+export async function fetchModels(): Promise<Array<{ id: string }>> {
+  const res = await fetch(`${BASE}/models`);
+  return (await res.json()).models;
+}
+
+export async function fetchCurrentModel(): Promise<{ model: string; provider: string }> {
+  const res = await fetch(`${BASE}/model`);
+  return res.json();
+}
+
+export async function setModel(model: string): Promise<{ model: string; persisted: boolean }> {
+  const res = await fetch(`${BASE}/model`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ model }),
+  });
+  return res.json();
+}
+
+export function streamChat(message: string, callbacks: StreamCallbacks, images?: string[]): () => void {
   const controller = new AbortController();
 
   (async () => {
     try {
+      const body: Record<string, unknown> = { message };
+      if (images?.length) body.images = images;
+
       const res = await fetch(`${BASE}/chat/stream`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ message }),
+        body: JSON.stringify(body),
         signal: controller.signal,
       });
 

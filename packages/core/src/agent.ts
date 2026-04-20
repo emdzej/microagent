@@ -1,4 +1,5 @@
-import type { LLMProvider, Message, StreamDelta, MicroagentConfig, ToolResult } from "./types.js";
+import type { LLMProvider, Message, StreamDelta, MicroagentConfig, ToolResult, ContentPart } from "./types.js";
+import { getTextContent } from "./types.js";
 import { ToolRegistry } from "./tool-registry.js";
 import { McpManager } from "./mcp.js";
 import { UsageStats } from "./stats.js";
@@ -49,8 +50,15 @@ export class Agent {
   }
 
   /** Run one user turn — may loop multiple times for tool calls */
-  async run(userMessage: string, events: AgentEvents = {}): Promise<string> {
-    this.messages.push({ role: "user", content: userMessage });
+  async run(userMessage: string, events: AgentEvents = {}, images?: string[]): Promise<string> {
+    const content: string | ContentPart[] = images?.length
+      ? [
+          { type: "text", text: userMessage } as const,
+          ...images.map((url) => ({ type: "image_url" as const, image_url: { url } })),
+        ]
+      : userMessage;
+
+    this.messages.push({ role: "user", content });
 
     let rounds = 0;
     while (rounds < this.maxToolRounds) {
@@ -68,7 +76,7 @@ export class Agent {
 
       // No tool calls — we're done
       if (!message.toolCalls?.length) {
-        return message.content;
+        return getTextContent(message);
       }
 
       // Execute all tool calls
@@ -92,6 +100,11 @@ export class Agent {
 
   getMessages(): readonly Message[] {
     return this.messages;
+  }
+
+  /** Switch the active model at runtime */
+  setModel(model: string): void {
+    this.provider.setModel(model);
   }
 
   async shutdown(): Promise<void> {

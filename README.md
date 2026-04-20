@@ -6,8 +6,10 @@ A minimal AI agent built in TypeScript. A reference implementation showing how t
 
 ## Features
 
-- **Interactive CLI** (Ink) and **Web UI** (Svelte 5 + Tailwind)
+- **Interactive CLI** (Ink) and **Web UI** (Svelte 5 + Tailwind, light theme)
 - **Any OpenAI-compatible LLM** — Ollama, GitHub Copilot, OpenAI, Groq, Together, LM Studio, vLLM...
+- **Multimodal** — attach images via CLI (`/image`), web UI (upload/paste), or API
+- **Runtime model switching** — `/model <name>` persists to config file
 - **Plugin-based tool system** — built-in tools and MCP servers register through the same registry
 - **MCP client** — connect to any MCP server via stdio or HTTP
 - **Streaming** — SSE streaming in both CLI and web UI
@@ -80,14 +82,21 @@ pnpm chat -- models -p github-copilot
 
 ## Chat Slash Commands
 
-Inside the interactive chat, the following slash commands are available:
+The following slash commands work in both the **CLI** and **Web UI**:
 
 | Command | Description |
 |---|---|
 | `/stats` | Show token usage, request count, and tool call stats |
 | `/tools` | List all registered tools (built-in + MCP) |
 | `/models` | Fetch and display available models from the provider |
-| `/quit` | Exit the chat (also `/exit` or Ctrl+C) |
+| `/model <name>` | Switch to a different model (persists to config file) |
+| `/model` | Show the currently active model |
+| `/image <path-or-url>` | Queue an image for the next message (CLI only) |
+| `/clear` | Clear chat history (Web UI only) |
+| `/help` | Show available commands (Web UI only) |
+| `/quit` | Exit the chat (CLI only, also `/exit` or Ctrl+C) |
+
+The Web UI also supports **image upload** via the `+img` button and **clipboard paste** (Ctrl+V).
 
 ## Config Wizard
 
@@ -277,8 +286,12 @@ Start with `pnpm serve` or `pnpm ui`.
 | `GET` | `/tools` | All tool definitions |
 | `GET` | `/stats` | Token/request/tool usage |
 | `GET` | `/models` | List available models from the provider |
-| `POST` | `/chat` | Sync chat `{ message }` -> `{ response, toolCalls, stats }` |
+| `GET` | `/model` | Get current model and provider |
+| `POST` | `/model` | Switch model `{ model }` -> `{ model, persisted }` |
+| `POST` | `/chat` | Sync chat `{ message, images? }` -> `{ response, toolCalls, stats }` |
 | `POST` | `/chat/stream` | SSE stream — events: `delta`, `tool_call`, `tool_result`, `complete`, `error` |
+
+Both `/chat` and `/chat/stream` accept an optional `images` array (data URIs or URLs) for multimodal messages.
 
 ```bash
 # Sync
@@ -403,7 +416,7 @@ OPENAI_API_KEY=sk-xxx docker compose up --build
 ```bash
 pnpm install
 pnpm build
-pnpm test          # 13 tests across core, cli, server
+pnpm test          # 19 tests across core, cli, server
 
 # Dev workflow (two terminals)
 pnpm serve         # API on :3100

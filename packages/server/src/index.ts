@@ -3,6 +3,8 @@ import cors from "@fastify/cors";
 import fastifyStatic from "@fastify/static";
 import type { Agent, StreamDelta, ToolResult, MicroagentConfig } from "@microagent/core";
 import { Agent as AgentClass } from "@microagent/core";
+import { readFileSync, existsSync, writeFileSync, mkdirSync } from "node:fs";
+import { dirname } from "node:path";
 
 export interface ServerOptions {
   host?: string;
@@ -10,6 +12,8 @@ export interface ServerOptions {
   /** Provide an existing agent, or pass config to create one */
   agent?: Agent;
   config?: MicroagentConfig;
+  /** Resolved config file path for persistence */
+  configPath?: string | null;
   /** Path to static files directory (built web UI) */
   staticDir?: string;
 }
@@ -55,17 +59,54 @@ export async function createServer(opts: ServerOptions) {
     return { models };
   });
 
+  // ── Get / set current model ───────────────────────────────────
+  app.get("/model", async () => ({
+    model: agent.provider.currentModel,
+    provider: agent.provider.name,
+  }));
+
+  app.post<{ Body: { model: string } }>("/model", {
+    schema: {
+      body: {
+        type: "object",
+        required: ["model"],
+        properties: { model: { type: "string" } },
+      },
+    },
+  }, async (request) => {
+    const { model } = request.body;
+    agent.setModel(model);
+
+    // Persist to config file if available
+    const configPath = opts.configPath;
+    if (configPath) {
+      try {
+        const raw = existsSync(configPath) ? JSON.parse(readFileSync(configPath, "utf-8")) as MicroagentConfig : {} as MicroagentConfig;
+        raw.provider = { ...raw.provider, model };
+        mkdirSync(dirname(configPath), { recursive: true });
+        writeFileSync(configPath, JSON.stringify(raw, null, 2) + "\n");
+      } catch {
+        // Non-fatal — model is already switched in memory
+      }
+    }
+
+    return { model, persisted: !!configPath };
+  });
+
   // ── Chat (non-streaming) ───────────────────────────────────────
-  app.post<{ Body: { message: string } }>("/chat", {
+  app.post<{ Body: { message: string; images?: string[] } }>("/chat", {
     schema: {
       body: {
         type: "object",
         required: ["message"],
-        properties: { message: { type: "string" } },
+        properties: {
+          message: { type: "string" },
+          images: { type: "array", items: { type: "string" } },
+        },
       },
     },
   }, async (request) => {
-    const { message } = request.body;
+    const { message, images } = request.body;
     const toolCalls: Array<{ name: string; args: Record<string, unknown>; result: string; isError?: boolean }> = [];
 
     const response = await agent.run(message, {
@@ -79,7 +120,7 @@ export async function createServer(opts: ServerOptions) {
           last.isError = result.isError;
         }
       },
-    });
+    }, images);
 
     return {
       response,
@@ -89,16 +130,19 @@ export async function createServer(opts: ServerOptions) {
   });
 
   // ── Chat SSE (streaming) ───────────────────────────────────────
-  app.post<{ Body: { message: string } }>("/chat/stream", {
+  app.post<{ Body: { message: string; images?: string[] } }>("/chat/stream", {
     schema: {
       body: {
         type: "object",
         required: ["message"],
-        properties: { message: { type: "string" } },
+        properties: {
+          message: { type: "string" },
+          images: { type: "array", items: { type: "string" } },
+        },
       },
     },
   }, async (request, reply) => {
-    const { message } = request.body;
+    const { message, images } = request.body;
 
     reply.raw.writeHead(200, {
       "Content-Type": "text/event-stream",
@@ -121,7 +165,7 @@ export async function createServer(opts: ServerOptions) {
         onToolResult(name: string, result: ToolResult) {
           send("tool_result", { name, content: result.content, isError: result.isError });
         },
-      });
+      }, images);
 
       send("complete", { response, stats: agent.stats.summary });
     } catch (err) {

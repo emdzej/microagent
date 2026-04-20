@@ -6,7 +6,7 @@ import { startChat } from "./app.js";
 import { startServer } from "@microagent/server";
 import type { MicroagentConfig } from "@microagent/core";
 import { Agent, paths, listModelsForProvider } from "@microagent/core";
-import { readFileSync, existsSync } from "node:fs";
+import { readFileSync, existsSync, writeFileSync, mkdirSync } from "node:fs";
 import { resolve, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { exec } from "node:child_process";
@@ -20,7 +20,7 @@ function createAgent(config: MicroagentConfig): Agent {
   return agent;
 }
 
-function loadConfig(opts: Record<string, string>): MicroagentConfig {
+function loadConfig(opts: Record<string, string>): { config: MicroagentConfig; configPath: string | null } {
   // Explicit --config flag
   if (opts.config) {
     const cfgPath = resolve(opts.config);
@@ -28,26 +28,29 @@ function loadConfig(opts: Record<string, string>): MicroagentConfig {
       console.error(`Config file not found: ${cfgPath}`);
       process.exit(1);
     }
-    return JSON.parse(readFileSync(cfgPath, "utf-8")) as MicroagentConfig;
+    return { config: JSON.parse(readFileSync(cfgPath, "utf-8")) as MicroagentConfig, configPath: cfgPath };
   }
 
   // Auto-discover: XDG config dir, then local file
   const candidates = [paths.configFile(), resolve("microagent.config.json")];
   for (const candidate of candidates) {
     if (existsSync(candidate)) {
-      return JSON.parse(readFileSync(candidate, "utf-8")) as MicroagentConfig;
+      return { config: JSON.parse(readFileSync(candidate, "utf-8")) as MicroagentConfig, configPath: candidate };
     }
   }
 
-  // Fallback to CLI flags
+  // Fallback to CLI flags — no config file to persist to
   return {
-    provider: {
-      type: opts.provider ?? "ollama",
-      model: opts.model ?? "llama3.2",
-      baseUrl: opts.baseUrl,
-      apiKey: opts.apiKey,
+    config: {
+      provider: {
+        type: opts.provider ?? "ollama",
+        model: opts.model ?? "llama3.2",
+        baseUrl: opts.baseUrl,
+        apiKey: opts.apiKey,
+      },
+      systemPrompt: opts.system ?? "You are a helpful coding assistant. Be concise.",
     },
-    systemPrompt: opts.system ?? "You are a helpful coding assistant. Be concise.",
+    configPath: null,
   };
 }
 
@@ -74,7 +77,8 @@ addProviderOpts(
     .command("chat", { isDefault: true })
     .description("Start interactive chat (default)")
 ).action(async (opts) => {
-  await startChat(loadConfig(opts));
+  const { config, configPath } = loadConfig(opts);
+  await startChat(config, configPath);
 });
 
 // ── serve ──────────────────────────────────────────────────────
@@ -85,11 +89,12 @@ addProviderOpts(
     .option("-H, --host <host>", "Bind host", "0.0.0.0")
     .option("--port <port>", "Bind port", "3100")
 ).action(async (opts) => {
-  const config = loadConfig(opts);
+  const { config, configPath } = loadConfig(opts);
   const agent = createAgent(config);
   await startServer({
     agent,
     config,
+    configPath,
     host: opts.host,
     port: parseInt(opts.port, 10),
   });
@@ -104,7 +109,7 @@ addProviderOpts(
     .option("--port <port>", "Bind port", "3200")
     .option("--no-open", "Don't open browser automatically")
 ).action(async (opts) => {
-  const config = loadConfig(opts);
+  const { config, configPath } = loadConfig(opts);
   const agent = createAgent(config);
   const __dirname = dirname(fileURLToPath(import.meta.url));
   const webDir = resolve(__dirname, "../../web/build");
@@ -116,6 +121,7 @@ addProviderOpts(
   await startServer({
     agent,
     config,
+    configPath,
     host: opts.host,
     port,
     staticDir: webDir,
@@ -146,7 +152,7 @@ addProviderOpts(
     .command("models")
     .description("List available models for a provider")
 ).action(async (opts) => {
-  const config = loadConfig(opts);
+  const { config } = loadConfig(opts);
   try {
     console.log(`Fetching models from ${config.provider.type}...\n`);
     const models = await listModelsForProvider(

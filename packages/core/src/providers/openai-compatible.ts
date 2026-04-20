@@ -23,14 +23,14 @@ export interface OpenAIProviderOptions {
  */
 export class OpenAICompatibleProvider implements LLMProvider {
   readonly name: string;
-  private model: string;
+  private _model: string;
   private baseUrl: string;
   private baseHeaders: Record<string, string>;
   private getApiKey?: () => Promise<string>;
 
   constructor(opts: OpenAIProviderOptions) {
     this.name = opts.name;
-    this.model = opts.model;
+    this._model = opts.model;
     // Normalize: strip trailing slash
     this.baseUrl = opts.baseUrl.replace(/\/+$/, "");
     this.baseHeaders = {
@@ -41,6 +41,14 @@ export class OpenAICompatibleProvider implements LLMProvider {
       this.baseHeaders["Authorization"] = `Bearer ${opts.apiKey}`;
     }
     this.getApiKey = opts.getApiKey;
+  }
+
+  get currentModel(): string {
+    return this._model;
+  }
+
+  setModel(model: string): void {
+    this._model = model;
   }
 
   private async resolveHeaders(): Promise<Record<string, string>> {
@@ -68,7 +76,7 @@ export class OpenAICompatibleProvider implements LLMProvider {
     onDelta?: (delta: StreamDelta) => void
   ): Promise<{ message: Message; usage: TokenUsage }> {
     const body: Record<string, unknown> = {
-      model: this.model,
+      model: this._model,
       messages: this.toOpenAIMessages(messages),
       stream: !!onDelta,
     };
@@ -109,12 +117,12 @@ export class OpenAICompatibleProvider implements LLMProvider {
   private toOpenAIMessages(messages: Message[]): unknown[] {
     return messages.map((m) => {
       if (m.role === "tool") {
-        return { role: "tool", content: m.content, tool_call_id: m.toolCallId };
+        return { role: "tool", content: typeof m.content === "string" ? m.content : "", tool_call_id: m.toolCallId };
       }
       if (m.role === "assistant" && m.toolCalls?.length) {
         return {
           role: "assistant",
-          content: m.content || null,
+          content: (typeof m.content === "string" ? m.content : "") || null,
           tool_calls: m.toolCalls.map((tc) => ({
             id: tc.id,
             type: "function",
@@ -122,6 +130,7 @@ export class OpenAICompatibleProvider implements LLMProvider {
           })),
         };
       }
+      // Pass content arrays (multimodal) through as-is for the OpenAI API
       return { role: m.role, content: m.content };
     });
   }

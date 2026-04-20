@@ -5,12 +5,12 @@ import type { MicroagentConfig } from "@microagent/core";
 import { Chat } from "./components/Chat.js";
 import { registerBuiltinTools } from "./tools/index.js";
 
-export async function startChat(config: MicroagentConfig): Promise<void> {
+export async function startChat(config: MicroagentConfig, configPath?: string | null): Promise<void> {
   const agent = new Agent(config);
   registerBuiltinTools(agent.tools);
   await agent.init(config.mcpServers);
 
-  const { waitUntilExit } = render(React.createElement(Chat, { agent }));
+  const { waitUntilExit } = render(React.createElement(Chat, { agent, configPath: configPath ?? null }));
 
   await waitUntilExit();
   await agent.shutdown();

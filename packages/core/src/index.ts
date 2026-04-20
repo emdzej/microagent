@@ -1,5 +1,8 @@
 export type {
   Message,
+  ContentPart,
+  TextPart,
+  ImagePart,
   ToolCall,
   ToolResult,
   StreamDelta,
@@ -12,6 +15,7 @@ export type {
   McpServerConfig,
   MicroagentConfig,
 } from "./types.js";
+export { getTextContent } from "./types.js";
 
 export { Agent } from "./agent.js";
 export type { AgentEvents } from "./agent.js";
