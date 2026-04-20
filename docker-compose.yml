@@ -1,0 +1,30 @@
+services:
+  microagent:
+    build: .
+    ports:
+      - "${MICROAGENT_PORT:-3100}:3100"
+    volumes:
+      - ./microagent.config.json:/etc/microagent/config.json:ro
+    environment:
+      - NODE_ENV=production
+      # Uncomment and set for GitHub Copilot provider
+      # - GITHUB_TOKEN=${GITHUB_TOKEN}
+      # Uncomment and set for OpenAI provider
+      # - OPENAI_API_KEY=${OPENAI_API_KEY}
+    # If using Ollama on the host machine:
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
+
+  # Optional: run Ollama as a sidecar
+  # Uncomment to run Ollama inside Docker instead of on host
+  # ollama:
+  #   image: ollama/ollama:latest
+  #   ports:
+  #     - "11434:11434"
+  #   volumes:
+  #     - ollama_data:/root/.ollama
+  #   restart: unless-stopped
+
+# volumes:
+#   ollama_data:
