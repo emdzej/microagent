@@ -12,6 +12,7 @@ import { fileURLToPath } from "node:url";
 import { exec } from "node:child_process";
 import { ConfigWizard } from "./components/ConfigWizard.js";
 import { registerBuiltinTools } from "./tools/index.js";
+import { resolveImage } from "./util/resolve-image.js";
 
 /** Create an agent with built-in tools registered */
 function createAgent(config: MicroagentConfig): Agent {
@@ -170,6 +171,82 @@ addProviderOpts(
   } catch (err) {
     console.error(`Failed to list models: ${err instanceof Error ? err.message : String(err)}`);
     process.exit(1);
+  }
+});
+
+// ── ask (one-shot query) ───────────────────────────────────────
+addProviderOpts(
+  program
+    .command("ask [prompt...]")
+    .description("Run a single query and exit. Prompt from args or stdin.")
+    .option("-a, --attachment <path>", "Attach an image (repeatable)", (val: string, prev: string[]) => [...prev, val], [] as string[])
+    .option("-r, --raw", "Output only the final response text (no tool calls, no stats)")
+).action(async (promptParts: string[], opts) => {
+  // Resolve prompt: positional args or stdin
+  let prompt: string;
+  if (promptParts.length) {
+    prompt = promptParts.join(" ");
+  } else if (!process.stdin.isTTY) {
+    // Read from stdin
+    const chunks: Buffer[] = [];
+    for await (const chunk of process.stdin) chunks.push(chunk);
+    prompt = Buffer.concat(chunks).toString("utf-8").trim();
+  } else {
+    console.error("Error: provide a prompt as arguments or pipe via stdin.");
+    process.exit(1);
+  }
+
+  if (!prompt) {
+    console.error("Error: empty prompt.");
+    process.exit(1);
+  }
+
+  const { config } = loadConfig(opts);
+  const agent = createAgent(config);
+  await agent.init(config.mcpServers);
+
+  // Resolve image attachments
+  const images: string[] = [];
+  for (const att of opts.attachment as string[]) {
+    const resolved = resolveImage(att);
+    if (!resolved) {
+      console.error(`File not found: ${att}`);
+      process.exit(1);
+    }
+    images.push(resolved);
+  }
+
+  const raw = Boolean(opts.raw);
+
+  try {
+    const response = await agent.run(prompt, {
+      onDelta: (delta) => {
+        if (!raw && delta.type === "text" && delta.text) {
+          process.stdout.write(delta.text);
+        }
+      },
+      onToolCall: (name, _args) => {
+        if (!raw) process.stderr.write(`→ ${name}\n`);
+      },
+      onToolResult: (name, result) => {
+        if (!raw) {
+          const preview = result.content.slice(0, 200);
+          process.stderr.write(`← ${name}: ${preview}${result.content.length > 200 ? "..." : ""}\n`);
+        }
+      },
+    }, images.length ? images : undefined);
+
+    if (raw) {
+      process.stdout.write(response);
+    } else {
+      // Newline after streamed output
+      process.stdout.write("\n");
+    }
+  } catch (err) {
+    console.error(err instanceof Error ? err.message : String(err));
+    process.exit(1);
+  } finally {
+    await agent.shutdown();
   }
 });
 

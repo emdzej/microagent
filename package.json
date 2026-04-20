@@ -12,6 +12,7 @@
     "serve": "node packages/cli/dist/bin.js serve",
     "ui": "node packages/cli/dist/bin.js ui",
     "dev:web": "pnpm --filter @microagent/web dev",
+    "ask": "node packages/cli/dist/bin.js ask",
     "dev:server": "node packages/cli/dist/bin.js serve"
   },
   "devDependencies": {

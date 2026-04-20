@@ -71,6 +71,15 @@ pnpm ui -- --no-open    # skip auto-open
 # List available models for a provider
 pnpm chat -- models -p github-copilot
 
+# One-shot query (no interactive UI)
+pnpm ask 'explain what a monad is'
+
+# Pipe from stdin
+echo 'explain this error' | pnpm ask
+
+# With image attachment and raw output (no tool calls / progress)
+pnpm ask -a screenshot.png -r 'describe this image'
+
 # All commands accept these flags:
 #   -p, --provider <type>   ollama | github-copilot | openai | <any>
 #   -m, --model <name>      Model name
@@ -78,6 +87,20 @@ pnpm chat -- models -p github-copilot
 #   --api-key <key>         API key
 #   -c, --config <path>     Path to config JSON
 #   -s, --system <prompt>   System prompt
+```
+
+## Global Install
+
+After publishing, install globally for the `microagent` command:
+
+```bash
+npm i -g @microagent/cli
+
+# Then use directly
+microagent chat
+microagent ask 'what is 2+2' --raw
+microagent serve
+microagent ui
 ```
 
 ## Chat Slash Commands

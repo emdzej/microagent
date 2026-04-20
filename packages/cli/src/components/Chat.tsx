@@ -2,8 +2,9 @@ import React, { useState, useCallback } from "react";
 import { Box, Text, useApp, useInput } from "ink";
 import TextInput from "ink-text-input";
 import type { Agent, StreamDelta, ToolResult, MicroagentConfig } from "@microagent/core";
-import { readFileSync, existsSync, writeFileSync, mkdirSync } from "fs";
-import { resolve, dirname } from "path";
+import { existsSync, readFileSync, writeFileSync, mkdirSync } from "fs";
+import { dirname } from "path";
+import { resolveImage } from "../util/resolve-image.js";
 
 interface Props {
   agent: Agent;
@@ -13,26 +14,6 @@ interface Props {
 interface OutputLine {
   type: "user" | "assistant" | "tool" | "error" | "info";
   text: string;
-}
-
-/** Read a local file and return a data URI, or return a URL as-is */
-function resolveImage(input: string): string | null {
-  // Already a URL
-  if (input.startsWith("http://") || input.startsWith("https://") || input.startsWith("data:")) {
-    return input;
-  }
-  // Local file — read and convert to base64 data URI
-  const abs = resolve(input);
-  if (!existsSync(abs)) return null;
-  const buf = readFileSync(abs);
-  const ext = abs.split(".").pop()?.toLowerCase() ?? "";
-  const mime =
-    ext === "png" ? "image/png"
-    : ext === "jpg" || ext === "jpeg" ? "image/jpeg"
-    : ext === "gif" ? "image/gif"
-    : ext === "webp" ? "image/webp"
-    : "image/png";
-  return `data:${mime};base64,${buf.toString("base64")}`;
 }
 
 export const Chat: React.FC<Props> = ({ agent, configPath }) => {
