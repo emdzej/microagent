@@ -13,7 +13,8 @@
   "scripts": {
     "build": "tsc",
     "dev": "tsc --watch",
-    "test": "vitest run"
+    "test": "vitest run",
+    "lint": "eslint src/"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.12.1",
