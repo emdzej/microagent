@@ -23,7 +23,12 @@ jobs:
           - target: x86_64-unknown-linux-gnu
             runner: ubuntu-latest
           - target: x86_64-apple-darwin
-            runner: macos-13
+            # `macos-13` was retired as a hosted label and queues forever with no
+            # runner assigned; `macos-15-intel` is the current Intel image.
+            # Building natively rather than cross-compiling from arm64, because
+            # the tree pulls aws-lc-sys and cmake — cross-building C from Apple
+            # Silicon is a risk not worth taking for one target.
+            runner: macos-15-intel
           - target: aarch64-apple-darwin
             runner: macos-latest
           - target: x86_64-pc-windows-msvc
@@ -74,7 +79,10 @@ jobs:
         run: |
           set -euo pipefail
 
-          version="${{ github.event.release.tag_name || github.sha }}"
+          # On a release this is the tag; on workflow_dispatch there is no tag, so
+          # fall back to a short SHA rather than the full 40 characters.
+          version="${{ github.event.release.tag_name }}"
+          version="${version:-$(git rev-parse --short HEAD)}"
           name="microagent-${version}-${{ matrix.target }}"
           bin_dir="rust/target/${{ matrix.target }}/release"
 
@@ -116,7 +124,7 @@ jobs:
       # artifacts on the run for inspection.
       - name: Upload as a run artifact
         if: github.event_name != 'release'
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.target }}
           path: dist/*
