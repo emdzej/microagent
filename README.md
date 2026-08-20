@@ -40,6 +40,22 @@ the same HTTP API, and hosts the same web UI build — optionally embedded, for 
 single binary with no Node runtime. See **[Rust Port Plan](docs/RUST_PORT_PLAN.md)**
 for the design decisions and the differences between the two.
 
+```bash
+pnpm rust:build              # cargo build --release
+pnpm rust:build:embed        # build the web UI, then embed it in the binary
+pnpm rust:test               # 166 tests
+pnpm rust:lint               # clippy -D warnings + rustfmt --check
+pnpm rust:chat               # interactive TUI
+pnpm rust:ask -- 'a question'
+pnpm rust:serve              # HTTP API on :3100
+pnpm rust:ui                 # API + web UI on :3200
+pnpm rust:wizard             # config wizard
+```
+
+Prebuilt binaries for Linux, macOS (Intel and Apple Silicon) and Windows are
+attached to each [release](../../releases), with SHA-256 checksums. They embed
+the web UI, so `microagent ui` works from a single file with no Node runtime.
+
 ```
 User ──► CLI (Ink)  ──► Agent ──► OpenAI-compatible API (Ollama/Copilot/...)
          Web (Svelte) ──► Fastify ──► Agent ──► ...

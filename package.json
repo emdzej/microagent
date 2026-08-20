@@ -13,7 +13,16 @@
     "ui": "node packages/cli/dist/bin.js ui",
     "dev:web": "pnpm --filter @microagent/web dev",
     "ask": "node packages/cli/dist/bin.js ask",
-    "dev:server": "node packages/cli/dist/bin.js serve"
+    "dev:server": "node packages/cli/dist/bin.js serve",
+    "rust:build": "cargo build --release --manifest-path rust/Cargo.toml",
+    "rust:build:embed": "pnpm --filter @microagent/web build && cargo build --release --manifest-path rust/Cargo.toml -p microagent-cli --features embed-web",
+    "rust:test": "cargo test --manifest-path rust/Cargo.toml",
+    "rust:lint": "cargo clippy --manifest-path rust/Cargo.toml --all-targets -- -D warnings && cargo fmt --all --manifest-path rust/Cargo.toml --check",
+    "rust:chat": "cargo run --quiet --manifest-path rust/Cargo.toml -- chat",
+    "rust:ask": "cargo run --quiet --manifest-path rust/Cargo.toml -- ask",
+    "rust:serve": "cargo run --quiet --manifest-path rust/Cargo.toml -- serve",
+    "rust:ui": "cargo run --quiet --manifest-path rust/Cargo.toml -- ui",
+    "rust:wizard": "cargo run --quiet --manifest-path rust/Cargo.toml -- config"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",

@@ -13,6 +13,17 @@ same settings.
 > deliberate deviations from the TypeScript version, and an honest record of what
 > the port turned up.
 
+## Install
+
+Prebuilt binaries for Linux, macOS (Intel and Apple Silicon) and Windows are
+attached to each [release](../../../releases), with SHA-256 checksums. They embed
+the web UI, so there is nothing else to install:
+
+```sh
+tar -xzf microagent-<version>-<target>.tar.gz
+./microagent-<version>-<target>/microagent chat
+```
+
 ## Build
 
 Requires Rust 1.97+ (edition 2024).
@@ -33,6 +44,10 @@ That produces a ~12.6 MB `target/release/microagent` that serves the full web UI
 from anywhere on disk.
 
 ## Run
+
+From the repository root, the same commands are available as pnpm scripts —
+`pnpm rust:chat`, `pnpm rust:ask`, `pnpm rust:serve`, `pnpm rust:ui`,
+`pnpm rust:wizard`, `pnpm rust:test`, `pnpm rust:lint`.
 
 ```sh
 cargo run -- config                  # interactive config wizard
