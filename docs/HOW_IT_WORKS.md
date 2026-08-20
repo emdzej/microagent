@@ -115,7 +115,10 @@ sequenceDiagram
 2. All registered tool definitions are sent with every LLM request — the model decides which (if any) to call.
 3. Tool calls are executed sequentially. Each result is appended as a `tool` role message with the matching `toolCallId`.
 4. The loop has a safety limit of **20 rounds** to prevent runaway tool-calling loops.
-5. Events (`onDelta`, `onToolCall`, `onToolResult`) are fired throughout for UI updates.
+5. Events (`onDelta`, `onToolCall`, `onToolResult`) are fired throughout for UI updates. `onToolCall` receives the tool call's `id` as its third argument, so a consumer can pair a call with its result — matching on `name` alone is ambiguous when one turn invokes the same tool twice.
+6. **Turns are serialised.** `messages[]` is a single array shared by every caller, so two overlapping `run()` calls would interleave their appends and could produce a `tool` message with no preceding `assistant` message carrying its `tool_calls` — a transcript most providers reject with a 400. Node's single thread does not prevent this: the interleave happens across `await` points, not within them. `run()` therefore queues behind any turn already in flight, and a failed turn does not wedge the queue.
+
+    This keeps one conversation consistent. It does *not* give separate callers separate histories — the HTTP server shares one conversation across requests. The Rust implementation splits `Agent` from `Conversation` and keys conversations by session instead; see [Rust Port Plan](RUST_PORT_PLAN.md).
 
 ---
 
@@ -699,8 +702,9 @@ sequenceDiagram
 
 - **Optimistic switching** — the model is changed immediately without validation. If the model doesn't exist, the next LLM call will fail with a clear error from the provider.
 - **Provider/model syntax** — `provider/model` switches both; bare `model` switches only the model on the current provider.
-- **Config persistence** — if a config file was used, the `/model` command updates both the provider's model in the `providers` array and the `activeProvider` field. Legacy single-provider configs update `provider.model` instead.
-- **The `loadConfig()` function** returns both the parsed config and the resolved file path (`configPath`). This path is threaded through to the CLI `Chat` component and the server's `POST /model` endpoint so both can persist changes.
+- **Config persistence** — handled by `persistModel()` in `packages/core/src/config.ts`, shared by the CLI's `/model` command and the server's `POST /model`. It re-reads the file rather than serialising the in-memory config, so unrelated keys and hand-written formatting survive. For a `providers` array it updates the matching entry and sets `activeProvider`. For a legacy single-`provider` config it updates `provider.model` **only when that entry is the provider being switched** — otherwise it writes nothing and returns `false`. Without that check, starting with `-p ollama` against a `github-copilot` config and switching models would stamp an Ollama model onto the Copilot entry.
+- **The `loadConfig()` function** (`packages/cli/src/config.ts`) returns both the parsed config and the resolved file path (`configPath`). This path is threaded through to the CLI `Chat` component and the server's `POST /model` endpoint so both can persist changes.
+- **CLI flags override a discovered config.** Discovery order is `--config`, then the XDG config file, then `./microagent.config.json`, then flag defaults. Whatever is found, `applyOverrides()` then layers any explicitly passed provider flags on top, so `-p github-copilot -m gpt-4o` takes effect even when a config file exists. This is why the provider flags carry no commander defaults: an unset flag has to be distinguishable from one passed the default value. Naming a provider that is not configured adds it rather than ignoring the flag.
 
 ---
 

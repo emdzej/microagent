@@ -34,3 +34,91 @@ jobs:
 
       - name: Test
         run: pnpm test
+
+  # The Rust workspace, on default features. Fast: needs no Node toolchain.
+  rust:
+    runs-on: ubuntu-latest
+
+    defaults:
+      run:
+        working-directory: rust
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+
+      - name: Format
+        run: cargo fmt --check
+
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+      # The MCP tests drive a real stdio server via a Python fixture, so python3
+      # must be present. It is preinstalled on ubuntu-latest.
+      - name: Test
+        run: cargo test
+
+  # The `embed-web` feature bakes packages/web/build into the binary, and
+  # rust-embed resolves that folder at compile time — a missing build is a hard
+  # compile error, not an empty asset set. So this path needs the SPA built
+  # first, which is why it is a separate job from `rust` above.
+  rust-embed-web:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+
+      - run: pnpm install --frozen-lockfile
+
+      - name: Build web assets
+        run: pnpm --filter @microagent/web build
+
+      - name: Clippy (all features)
+        run: cargo clippy --all-targets --all-features -- -D warnings
+        working-directory: rust
+
+      - name: Test (all features)
+        run: cargo test --all-features
+        working-directory: rust
+
+      - name: Verify the single binary serves the embedded UI
+        run: |
+          cargo build --release -p microagent-cli --features embed-web
+          # Run from a directory with no assets on disk, so anything served must
+          # have come from inside the binary.
+          cd "$(mktemp -d)"
+          cat > config.json <<'JSON'
+          { "providers": [{ "type": "ollama", "model": "llama3.2" }] }
+          JSON
+          "$GITHUB_WORKSPACE/rust/target/release/microagent" ui \
+            -c config.json --port 3999 --no-open &
+          server=$!
+          for _ in $(seq 1 30); do
+            curl -sf -o /dev/null "http://127.0.0.1:3999/health" && break
+            sleep 1
+          done
+          curl -sf "http://127.0.0.1:3999/" | grep -q "<!DOCTYPE html>"
+          kill "$server"
+        working-directory: rust
