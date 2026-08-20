@@ -3,6 +3,8 @@
 A minimal AI agent built in TypeScript. A reference implementation showing how to build an interactive LLM agent with tool use, MCP server integration, and streaming — in ~1500 lines of code.
 
 > **[How It Works](docs/HOW_IT_WORKS.md)** — deep dive into the agent loop, provider abstraction, tool binding, MCP integration, and message protocol (with Mermaid diagrams).
+>
+> **[Rust Port Plan](docs/RUST_PORT_PLAN.md)** — the parallel Rust implementation in `rust/`: design decisions, deliberate deviations, and what porting turned up.
 
 ## Features
 
@@ -25,7 +27,18 @@ packages/
   server/     @microagent/server   Fastify HTTP API (REST + SSE streaming)
   cli/        @microagent/cli      Ink terminal UI + commander entry point
   web/        @microagent/web      Svelte 5 SPA (Tailwind CSS)
+
+rust/                                A second implementation, same design
+  crates/core/    microagent-core    LLM provider, tool registry, MCP client, agent loop
+  crates/server/  microagent-server  axum HTTP API (REST + SSE)
+  crates/cli/     microagent (bin)   clap + ratatui TUI
 ```
+
+There is also a **[Rust implementation](rust/README.md)** of the same agent,
+interoperable with this one: it reads the same config file and token cache, serves
+the same HTTP API, and hosts the same web UI build — optionally embedded, for a
+single binary with no Node runtime. See **[Rust Port Plan](docs/RUST_PORT_PLAN.md)**
+for the design decisions and the differences between the two.
 
 ```
 User ──► CLI (Ink)  ──► Agent ──► OpenAI-compatible API (Ollama/Copilot/...)
