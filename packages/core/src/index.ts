@@ -29,3 +29,4 @@ export { createProvider, listModelsForProvider } from "./providers/factory.js";
 export { getCopilotToken } from "./providers/github-auth.js";
 export type { DeviceFlowCallbacks } from "./providers/github-auth.js";
 export { paths } from "./paths.js";
+export { persistModel } from "./config.js";

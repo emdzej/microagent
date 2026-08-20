@@ -6,12 +6,13 @@ import { startChat } from "./app.js";
 import { startServer } from "@microagent/server";
 import type { MicroagentConfig } from "@microagent/core";
 import { Agent, paths, listModelsForProvider, resolveProviders } from "@microagent/core";
-import { readFileSync, existsSync, writeFileSync, mkdirSync } from "node:fs";
-import { resolve, dirname, join } from "node:path";
+import { existsSync } from "node:fs";
+import { resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { exec } from "node:child_process";
 import { ConfigWizard } from "./components/ConfigWizard.js";
 import { registerBuiltinTools } from "./tools/index.js";
+import { loadConfig, DEFAULT_PROVIDER, DEFAULT_MODEL } from "./config.js";
 import { resolveImage } from "./util/resolve-image.js";
 
 /** Create an agent with built-in tools registered */
@@ -19,40 +20,6 @@ function createAgent(config: MicroagentConfig): Agent {
   const agent = new Agent(config);
   registerBuiltinTools(agent.tools);
   return agent;
-}
-
-function loadConfig(opts: Record<string, string>): { config: MicroagentConfig; configPath: string | null } {
-  // Explicit --config flag
-  if (opts.config) {
-    const cfgPath = resolve(opts.config);
-    if (!existsSync(cfgPath)) {
-      console.error(`Config file not found: ${cfgPath}`);
-      process.exit(1);
-    }
-    return { config: JSON.parse(readFileSync(cfgPath, "utf-8")) as MicroagentConfig, configPath: cfgPath };
-  }
-
-  // Auto-discover: XDG config dir, then local file
-  const candidates = [paths.configFile(), resolve("microagent.config.json")];
-  for (const candidate of candidates) {
-    if (existsSync(candidate)) {
-      return { config: JSON.parse(readFileSync(candidate, "utf-8")) as MicroagentConfig, configPath: candidate };
-    }
-  }
-
-  // Fallback to CLI flags — no config file to persist to
-  return {
-    config: {
-      provider: {
-        type: opts.provider ?? "ollama",
-        model: opts.model ?? "llama3.2",
-        baseUrl: opts.baseUrl,
-        apiKey: opts.apiKey,
-      },
-      systemPrompt: opts.system ?? "You are a helpful coding assistant. Be concise.",
-    },
-    configPath: null,
-  };
 }
 
 const program = new Command();
@@ -65,8 +32,11 @@ program
 // ── Shared options ─────────────────────────────────────────────
 const addProviderOpts = (cmd: Command) =>
   cmd
-    .option("-p, --provider <type>", "LLM provider: ollama | github-copilot | openai", "ollama")
-    .option("-m, --model <name>", "Model name", "llama3.2")
+    // No commander defaults here on purpose: they would make an unpassed flag
+    // indistinguishable from an explicit one, and `applyOverrides` needs to know
+    // which flags the user actually set. Defaults live in `loadConfig`.
+    .option("-p, --provider <type>", `LLM provider: ollama | github-copilot | openai (default: ${DEFAULT_PROVIDER})`)
+    .option("-m, --model <name>", `Model name (default: ${DEFAULT_MODEL})`)
     .option("--base-url <url>", "Provider base URL")
     .option("--api-key <key>", "API key (or use GITHUB_TOKEN / OPENAI_API_KEY env)")
     .option("-c, --config <path>", "Path to config JSON file")

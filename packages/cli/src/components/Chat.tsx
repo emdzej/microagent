@@ -1,9 +1,8 @@
 import React, { useState, useCallback } from "react";
 import { Box, Text, useApp, useInput } from "ink";
 import TextInput from "ink-text-input";
-import type { Agent, StreamDelta, ToolResult, MicroagentConfig } from "@microagent/core";
-import { existsSync, readFileSync, writeFileSync, mkdirSync } from "fs";
-import { dirname } from "path";
+import type { Agent, StreamDelta, ToolResult } from "@microagent/core";
+import { persistModel } from "@microagent/core";
 import { resolveImage } from "../util/resolve-image.js";
 
 interface Props {
@@ -95,17 +94,14 @@ export const Chat: React.FC<Props> = ({ agent, configPath }) => {
           // Persist to config file if available
           if (configPath) {
             try {
-              const raw = existsSync(configPath) ? JSON.parse(readFileSync(configPath, "utf-8")) as MicroagentConfig : {} as MicroagentConfig;
-              if (raw.providers?.length) {
-                const pc = raw.providers.find((p) => (p.name ?? p.type) === provName || p.type === provName);
-                if (pc) pc.model = newModel;
-                raw.activeProvider = provName;
-              } else if (raw.provider) {
-                raw.provider.model = newModel;
+              if (persistModel(configPath, provName, newModel)) {
+                addLine({ type: "info", text: `Config saved to ${configPath}` });
+              } else {
+                addLine({
+                  type: "info",
+                  text: `Not saved: ${provName} is not configured in ${configPath}`,
+                });
               }
-              mkdirSync(dirname(configPath), { recursive: true });
-              writeFileSync(configPath, JSON.stringify(raw, null, 2) + "\n");
-              addLine({ type: "info", text: `Config saved to ${configPath}` });
             } catch (err) {
               const msg = err instanceof Error ? err.message : String(err);
               addLine({ type: "error", text: `Failed to save config: ${msg}` });

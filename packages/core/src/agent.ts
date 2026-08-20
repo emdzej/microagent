@@ -7,7 +7,15 @@ import { createProvider } from "./providers/factory.js";
 
 export interface AgentEvents {
   onDelta?: (delta: StreamDelta) => void;
-  onToolCall?: (name: string, args: Record<string, unknown>) => void;
+  /**
+   * A tool is about to run. `id` is the tool call's id — use it to pair this
+   * call with its `onToolResult`.
+   *
+   * Pairing on `name` alone is ambiguous when a turn invokes the same tool more
+   * than once. It happens to work today only because tool calls are executed
+   * strictly sequentially; it breaks as soon as they are not.
+   */
+  onToolCall?: (name: string, args: Record<string, unknown>, id: string) => void;
   onToolResult?: (name: string, result: ToolResult) => void;
   onError?: (error: Error) => void;
 }
@@ -22,6 +30,20 @@ export class Agent {
   readonly stats: UsageStats;
   private messages: Message[] = [];
   private maxToolRounds = 20;
+  /**
+   * Tail of the queue of in-flight turns.
+   *
+   * `messages` is a single array shared by every caller, so two overlapping
+   * `run()` calls would interleave their appends: a `tool` message can land
+   * without the `assistant` message carrying its `tool_calls`, which most
+   * providers then reject with a 400. Node's single thread does not help here —
+   * the interleave happens across `await` points, not within them.
+   *
+   * Turns therefore queue instead of overlapping. This keeps one conversation
+   * consistent; it does not give separate callers separate histories, which
+   * would need a conversation-per-session redesign.
+   */
+  private turnQueue: Promise<unknown> = Promise.resolve();
 
   constructor(config: MicroagentConfig) {
     this.tools = new ToolRegistry();
@@ -118,8 +140,29 @@ export class Agent {
     }
   }
 
-  /** Run one user turn — may loop multiple times for tool calls */
+  /**
+   * Run one user turn — may loop multiple times for tool calls.
+   *
+   * Turns are serialised: if one is already running, this waits for it rather
+   * than interleaving into the shared message history. See `turnQueue`.
+   */
   async run(userMessage: string, events: AgentEvents = {}, images?: string[]): Promise<string> {
+    const run = this.turnQueue.then(
+      () => this.runTurn(userMessage, events, images),
+      // A failed predecessor must not poison the queue for everyone behind it.
+      () => this.runTurn(userMessage, events, images)
+    );
+    // Keep the chain alive past a rejection, so one failed turn does not wedge
+    // every later one.
+    this.turnQueue = run.catch(() => {});
+    return run;
+  }
+
+  private async runTurn(
+    userMessage: string,
+    events: AgentEvents,
+    images?: string[]
+  ): Promise<string> {
     const content: string | ContentPart[] = images?.length
       ? [
           { type: "text", text: userMessage } as const,
@@ -151,7 +194,7 @@ export class Agent {
       // Execute all tool calls
       for (const tc of message.toolCalls) {
         this.stats.recordToolCall();
-        events.onToolCall?.(tc.name, tc.arguments);
+        events.onToolCall?.(tc.name, tc.arguments, tc.id);
 
         const result = await this.tools.execute(tc);
         events.onToolResult?.(tc.name, result);
