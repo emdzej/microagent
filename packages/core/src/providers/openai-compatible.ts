@@ -177,15 +177,29 @@ export class OpenAICompatibleProvider implements LLMProvider {
           if (delta.tool_calls) {
             for (const tc of delta.tool_calls) {
               const idx = tc.index ?? 0;
-              if (tc.id) {
-                toolCallsMap.set(idx, { id: tc.id, name: tc.function?.name ?? "", argsJson: "" });
-                onDelta({ type: "tool_call_start", toolCall: { id: tc.id, name: tc.function?.name } });
+
+              // Accumulate into the existing entry rather than replacing it.
+              // Creating a fresh entry whenever a chunk carries an `id` throws
+              // away any arguments already buffered for this index — harmless
+              // when the id arrives in the first chunk, but silently corrupting
+              // for providers that send arguments first, or that repeat the id.
+              let existing = toolCallsMap.get(idx);
+              if (!existing) {
+                existing = { id: "", name: "", argsJson: "" };
+                toolCallsMap.set(idx, existing);
               }
-              const existing = toolCallsMap.get(idx);
-              if (existing && tc.function?.arguments) {
-                existing.argsJson += tc.function.arguments;
-                if (tc.function.name) existing.name = tc.function.name;
+
+              if (tc.id && !existing.id) {
+                existing.id = tc.id;
+                if (tc.function?.name) existing.name = tc.function.name;
+                onDelta({
+                  type: "tool_call_start",
+                  toolCall: { id: existing.id, name: existing.name },
+                });
               }
+
+              if (tc.function?.name) existing.name = tc.function.name;
+              if (tc.function?.arguments) existing.argsJson += tc.function.arguments;
             }
           }
         }

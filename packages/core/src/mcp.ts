@@ -1,7 +1,7 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
-import type { McpServerConfig, ToolPlugin, ToolDefinition } from "./types.js";
+import type { McpServerConfig, ToolPlugin } from "./types.js";
 
 /** Manages connections to MCP servers and exposes their tools as plugins */
 export class McpManager {

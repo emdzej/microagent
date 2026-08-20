@@ -4,7 +4,7 @@ import { Select, TextInput, ConfirmInput } from "@inkjs/ui";
 import { writeFileSync, mkdirSync } from "node:fs";
 import { resolve, dirname } from "node:path";
 import type { MicroagentConfig, McpServerConfig, ModelInfo } from "@microagent/core";
-import { paths, listModelsForProvider } from "@microagent/core";
+import { listModelsForProvider } from "@microagent/core";
 
 type Step =
   | "provider"
@@ -69,14 +69,6 @@ export const ConfigWizard: React.FC<Props> = ({ outputPath: initialOutput }) => 
   const [models, setModels] = useState<ModelInfo[]>([]);
   const [fetchError, setFetchError] = useState("");
   const [authHint, setAuthHint] = useState("");
-
-  const needsApiKey = provider === "openai" || provider === "custom";
-  const needsBaseUrl = provider === "custom";
-
-  // Determine the step after provider auth/config is done
-  function nextStepAfterProvider() {
-    return needsBaseUrl ? "baseUrl" : needsApiKey ? "apiKey" : "fetchModels";
-  }
 
   function saveConfig() {
     const allProviders = [...configuredProviders];
@@ -159,9 +151,10 @@ export const ConfigWizard: React.FC<Props> = ({ outputPath: initialOutput }) => 
             setProvider(val);
             setModel(MODEL_SUGGESTIONS[val] ?? "");
             setBaseUrl(BASE_URL_DEFAULTS[val] ?? "");
-            setStep(
-              val === "custom" ? "baseUrl" : (val === "openai" || val === "custom") ? "apiKey" : "fetchModels"
-            );
+            // Branch on `val`, not on state derived from `provider`:
+            // `setProvider` above has not applied yet, so a derived flag would
+            // still describe the previously selected provider.
+            setStep(val === "custom" ? "baseUrl" : val === "openai" ? "apiKey" : "fetchModels");
           }}
         />
       </Box>

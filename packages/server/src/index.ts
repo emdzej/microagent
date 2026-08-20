@@ -2,9 +2,7 @@ import Fastify from "fastify";
 import cors from "@fastify/cors";
 import fastifyStatic from "@fastify/static";
 import type { Agent, StreamDelta, ToolResult, MicroagentConfig } from "@microagent/core";
-import { Agent as AgentClass } from "@microagent/core";
-import { readFileSync, existsSync, writeFileSync, mkdirSync } from "node:fs";
-import { dirname } from "node:path";
+import { Agent as AgentClass, persistModel } from "@microagent/core";
 
 export interface ServerOptions {
   host?: string;
@@ -77,26 +75,20 @@ export async function createServer(opts: ServerOptions) {
     const { model } = request.body;
     const { provider: provName, model: newModel } = agent.setModel(model);
 
-    // Persist to config file if available
+    // Persist to config file if available. Non-fatal on failure — the model is
+    // already switched in memory. `persisted` now reports whether the file was
+    // actually written, not merely whether a path was configured.
+    let persisted = false;
     const configPath = opts.configPath;
     if (configPath) {
       try {
-        const raw = existsSync(configPath) ? JSON.parse(readFileSync(configPath, "utf-8")) as MicroagentConfig : {} as MicroagentConfig;
-        if (raw.providers?.length) {
-          const pc = raw.providers.find((p: { name?: string; type: string }) => (p.name ?? p.type) === provName || p.type === provName);
-          if (pc) pc.model = newModel;
-          raw.activeProvider = provName;
-        } else if (raw.provider) {
-          raw.provider.model = newModel;
-        }
-        mkdirSync(dirname(configPath), { recursive: true });
-        writeFileSync(configPath, JSON.stringify(raw, null, 2) + "\n");
+        persisted = persistModel(configPath, provName, newModel);
       } catch {
-        // Non-fatal — model is already switched in memory
+        persisted = false;
       }
     }
 
-    return { provider: provName, model: newModel, persisted: !!configPath };
+    return { provider: provName, model: newModel, persisted };
   });
 
   // ── Chat (non-streaming) ───────────────────────────────────────
@@ -113,17 +105,25 @@ export async function createServer(opts: ServerOptions) {
     },
   }, async (request) => {
     const { message, images } = request.body;
-    const toolCalls: Array<{ name: string; args: Record<string, unknown>; result: string; isError?: boolean }> = [];
+    const toolCalls: Array<{ id: string; name: string; args: Record<string, unknown>; result: string; isError?: boolean }> = [];
 
     const response = await agent.run(message, {
-      onToolCall(name, args) {
-        toolCalls.push({ name, args, result: "" });
+      onToolCall(name, args, id) {
+        toolCalls.push({ id, name, args, result: "" });
       },
-      onToolResult(name, result: ToolResult) {
-        const last = [...toolCalls].reverse().find((t) => t.name === name);
-        if (last) {
-          last.result = result.content;
-          last.isError = result.isError;
+      onToolResult(_name, result: ToolResult) {
+        // Match on the call id rather than searching backwards by name.
+        //
+        // The name-based lookup this replaces was not actively broken: the agent
+        // executes tool calls strictly sequentially (call, await, result), so the
+        // most recent call with a given name always was the right one. It was
+        // latent — it silently breaks the moment tool calls are executed in
+        // parallel or results are delivered out of order, which is a natural
+        // optimisation for a turn requesting several tools.
+        const call = toolCalls.find((t) => t.id === result.toolCallId);
+        if (call) {
+          call.result = result.content;
+          call.isError = result.isError;
         }
       },
     }, images);
@@ -165,11 +165,19 @@ export async function createServer(opts: ServerOptions) {
         onDelta(delta: StreamDelta) {
           send("delta", delta);
         },
-        onToolCall(name: string, args: Record<string, unknown>) {
-          send("tool_call", { name, args });
+        // `id` lets a client pair a result with its call — necessary when one
+        // turn invokes the same tool more than once. Additive: existing clients
+        // that ignore the field are unaffected.
+        onToolCall(name: string, args: Record<string, unknown>, id: string) {
+          send("tool_call", { id, name, args });
         },
         onToolResult(name: string, result: ToolResult) {
-          send("tool_result", { name, content: result.content, isError: result.isError });
+          send("tool_result", {
+            id: result.toolCallId,
+            name,
+            content: result.content,
+            isError: result.isError,
+          });
         },
       }, images);
 
