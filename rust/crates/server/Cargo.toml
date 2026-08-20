@@ -1,0 +1,30 @@
+[package]
+name = "microagent-server"
+description = "HTTP API (REST + SSE) for microagent"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[features]
+default = []
+# Bake the built web UI (packages/web/build) into the binary.
+embed-web = ["dep:rust-embed", "dep:mime_guess"]
+
+[dependencies]
+microagent-core.workspace = true
+# `signal` for graceful shutdown on Ctrl-C.
+tokio = { workspace = true, features = ["signal"] }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+futures-util.workspace = true
+axum.workspace = true
+tower-http.workspace = true
+tokio-stream.workspace = true
+rust-embed = { version = "8.12", optional = true }
+mime_guess = { version = "2", optional = true }
+
+[dev-dependencies]
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"

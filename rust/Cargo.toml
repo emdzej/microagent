@@ -1,0 +1,62 @@
+[workspace]
+members = ["crates/core", "crates/server", "crates/cli"]
+resolver = "3"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+repository = "https://github.com/mjaskolski/microagent"
+
+[workspace.dependencies]
+microagent-core = { path = "crates/core" }
+microagent-server = { path = "crates/server" }
+
+tokio = { version = "1.53", features = [
+    "rt-multi-thread",
+    "macros",
+    "process",
+    "time",
+    "sync",
+    "io-util",
+] }
+reqwest = { version = "0.13.2", default-features = false, features = [
+    "json",
+    "stream",
+    "http2",
+    # 0.13 renamed the TLS features: `rustls-tls` became `rustls`, and the
+    # separate cert-source features were folded in — `rustls` now pulls
+    # `rustls-platform-verifier`, so the OS trust store is used by default. That
+    # matters behind corporate TLS-intercepting proxies with an internal CA.
+    "rustls",
+] }
+eventsource-stream = "0.2"
+futures-util = "0.3"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+schemars = "1.2"
+async-trait = "0.1"
+thiserror = "2.0"
+base64 = "0.23"
+anyhow = "1"
+
+axum = { version = "0.8", features = ["json", "macros"] }
+tower-http = { version = "0.7", features = ["cors", "fs"] }
+tokio-stream = "0.1"
+
+clap = { version = "4.6", features = ["derive", "env"] }
+ratatui = "0.30"
+crossterm = { version = "0.29", features = ["event-stream"] }
+# FuzzySelect (model picker) is behind the `fuzzy-select` feature.
+dialoguer = { version = "0.12", features = ["fuzzy-select", "password"] }
+
+# The `client` feature alone is not enough: each transport is gated separately.
+rmcp = { version = "3.1", features = [
+    "client",
+    "transport-child-process",
+    "transport-streamable-http-client-reqwest",
+] }
+
+[profile.release]
+lto = "thin"
+strip = true
