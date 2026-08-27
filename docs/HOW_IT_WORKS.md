@@ -109,16 +109,16 @@ sequenceDiagram
     end
 ```
 
-**Key implementation details** (`packages/core/src/agent.ts`):
+**Key implementation details** (`packages/core/src/session.ts`):
 
-1. The user message is appended to a persistent `messages[]` array (conversation state lives in memory for the session).
+1. The user message is appended to the session's own `messages[]` array (conversation state lives in memory for that session).
 2. All registered tool definitions are sent with every LLM request — the model decides which (if any) to call.
 3. Tool calls are executed sequentially. Each result is appended as a `tool` role message with the matching `toolCallId`.
 4. The loop has a safety limit of **20 rounds** to prevent runaway tool-calling loops.
 5. Events (`onDelta`, `onToolCall`, `onToolResult`) are fired throughout for UI updates. `onToolCall` receives the tool call's `id` as its third argument, so a consumer can pair a call with its result — matching on `name` alone is ambiguous when one turn invokes the same tool twice.
-6. **Turns are serialised.** `messages[]` is a single array shared by every caller, so two overlapping `run()` calls would interleave their appends and could produce a `tool` message with no preceding `assistant` message carrying its `tool_calls` — a transcript most providers reject with a 400. Node's single thread does not prevent this: the interleave happens across `await` points, not within them. `run()` therefore queues behind any turn already in flight, and a failed turn does not wedge the queue.
+6. **Turns are serialised within a session.** A session's `messages[]` is one array, so two overlapping `run()` calls on the *same* session would interleave their appends and could produce a `tool` message with no preceding `assistant` message carrying its `tool_calls` — a transcript most providers reject with a 400. Node's single thread does not prevent this: the interleave happens across `await` points, not within them. `run()` therefore queues behind any turn already in flight on that session, and a failed turn does not wedge the queue.
 
-    This keeps one conversation consistent. It does *not* give separate callers separate histories — the HTTP server shares one conversation across requests. The Rust implementation splits `Agent` from `Conversation` and keys conversations by session instead; see [Rust Port Plan](RUST_PORT_PLAN.md).
+    The queue is **per session, not global**, so separate sessions run concurrently. `Agent` is a factory holding the shared, per-turn-stateless things — providers, the tool registry, MCP connections — while conversation state lives in `Session`. That split is a correctness requirement rather than tidiness: with one shared array, one HTTP caller's context and whatever their tools returned appeared in the next caller's prompt.
 
 ---
 

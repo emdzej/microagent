@@ -127,12 +127,12 @@ describe("concurrent turns", () => {
 
     const messages = agent.getMessages();
 
-    // system + 3 × (user, assistant)
-    expect(messages).toHaveLength(7);
-    expect(messages[0].role).toBe("system");
+    // 3 × (user, assistant). The system prompt is no longer message zero — it
+    // travels as the provider's top-level `system` parameter.
+    expect(messages).toHaveLength(6);
 
     // Turns must appear as clean user/assistant pairs, not interleaved.
-    for (let i = 1; i < messages.length; i += 2) {
+    for (let i = 0; i < messages.length; i += 2) {
       expect(messages[i].role).toBe("user");
       expect(messages[i + 1].role).toBe("assistant");
     }

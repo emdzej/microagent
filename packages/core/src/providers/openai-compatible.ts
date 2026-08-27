@@ -1,4 +1,15 @@
-import type { LLMProvider, Message, ToolDefinition, StreamDelta, TokenUsage, ModelInfo } from "../types.js";
+import type {
+  ChatOptions,
+  ChatResult,
+  ContentPart,
+  LLMProvider,
+  Message,
+  ModelInfo,
+  ProviderStopReason,
+  StreamDelta,
+  SystemBlock,
+  TokenUsage,
+} from "../types.js";
 
 /** Configuration for any OpenAI-compatible endpoint */
 export interface OpenAIProviderOptions {
@@ -14,6 +25,8 @@ export interface OpenAIProviderOptions {
   getApiKey?: () => Promise<string>;
   /** Extra headers to send with every request */
   headers?: Record<string, string>;
+  /** Default output cap, when a call does not specify one. */
+  maxTokens?: number;
 }
 
 /**
@@ -27,10 +40,12 @@ export class OpenAICompatibleProvider implements LLMProvider {
   private baseUrl: string;
   private baseHeaders: Record<string, string>;
   private getApiKey?: () => Promise<string>;
+  private defaultMaxTokens?: number;
 
   constructor(opts: OpenAIProviderOptions) {
     this.name = opts.name;
     this._model = opts.model;
+    this.defaultMaxTokens = opts.maxTokens;
     // Normalize: strip trailing slash
     this.baseUrl = opts.baseUrl.replace(/\/+$/, "");
     this.baseHeaders = {
@@ -57,9 +72,9 @@ export class OpenAICompatibleProvider implements LLMProvider {
     return { ...this.baseHeaders, Authorization: `Bearer ${key}` };
   }
 
-  async listModels(): Promise<ModelInfo[]> {
+  async listModels(signal?: AbortSignal): Promise<ModelInfo[]> {
     const headers = await this.resolveHeaders();
-    const res = await fetch(`${this.baseUrl}/models`, { headers });
+    const res = await fetch(`${this.baseUrl}/models`, { headers, signal });
     if (!res.ok) {
       throw new Error(`${this.name} models error: ${res.status} ${await res.text()}`);
     }
@@ -70,16 +85,25 @@ export class OpenAICompatibleProvider implements LLMProvider {
       .sort((a, b) => a.id.localeCompare(b.id));
   }
 
-  async chat(
-    messages: Message[],
-    tools?: ToolDefinition[],
-    onDelta?: (delta: StreamDelta) => void
-  ): Promise<{ message: Message; usage: TokenUsage }> {
+  /**
+   * One chat completion.
+   *
+   * `cacheBreakpoints`, `thinking` and `effort` are accepted and ignored: this
+   * API has no equivalent, and silently ignoring a hint is the right behaviour
+   * for a portable option — the alternative is every caller branching on
+   * provider type before it can set one.
+   */
+  async chat(messages: Message[], options: ChatOptions = {}): Promise<ChatResult> {
+    const { tools, onDelta, signal, maxTokens, system, responseFormat } = options;
+
     const body: Record<string, unknown> = {
       model: this._model,
-      messages: this.toOpenAIMessages(messages),
+      messages: this.toOpenAIMessages(messages, system),
       stream: !!onDelta,
     };
+
+    const cap = maxTokens ?? this.defaultMaxTokens;
+    if (cap !== undefined) body.max_tokens = cap;
 
     // Request usage in stream mode (OpenAI extension, supported by most)
     if (onDelta) {
@@ -93,11 +117,25 @@ export class OpenAICompatibleProvider implements LLMProvider {
       }));
     }
 
+    if (responseFormat) {
+      body.response_format = {
+        type: "json_schema",
+        json_schema: {
+          name: responseFormat.name ?? "response",
+          schema: responseFormat.schema,
+          strict: true,
+        },
+      };
+    }
+
     const headers = await this.resolveHeaders();
     const res = await fetch(`${this.baseUrl}/chat/completions`, {
       method: "POST",
       headers,
       body: JSON.stringify(body),
+      // Reaching the transport is the point: a cancel that only stops the loop
+      // between rounds leaves this request running to completion.
+      signal,
     });
 
     if (!res.ok) {
@@ -114,13 +152,27 @@ export class OpenAICompatibleProvider implements LLMProvider {
 
   // ── Message conversion ──────────────────────────────────────────
 
-  private toOpenAIMessages(messages: Message[]): unknown[] {
-    return messages.map((m) => {
+  private toOpenAIMessages(messages: Message[], system?: string | SystemBlock[]): unknown[] {
+    const out: unknown[] = [];
+
+    // This API takes the system prompt as a message, so the top-level `system`
+    // option is folded back in here. Core keeps it separate because other
+    // providers take it as a request parameter and attach cache breakpoints to
+    // it — the block boundary has to survive that far.
+    const systemText = systemToText(system);
+    if (systemText) out.push({ role: "system", content: systemText });
+
+    for (const m of messages) {
       if (m.role === "tool") {
-        return { role: "tool", content: typeof m.content === "string" ? m.content : "", tool_call_id: m.toolCallId };
+        out.push({
+          role: "tool",
+          content: typeof m.content === "string" ? m.content : "",
+          tool_call_id: m.toolCallId,
+        });
+        continue;
       }
       if (m.role === "assistant" && m.toolCalls?.length) {
-        return {
+        out.push({
           role: "assistant",
           content: (typeof m.content === "string" ? m.content : "") || null,
           tool_calls: m.toolCalls.map((tc) => ({
@@ -128,11 +180,27 @@ export class OpenAICompatibleProvider implements LLMProvider {
             type: "function",
             function: { name: tc.name, arguments: JSON.stringify(tc.arguments) },
           })),
-        };
+        });
+        continue;
       }
-      // Pass content arrays (multimodal) through as-is for the OpenAI API
-      return { role: m.role, content: m.content };
-    });
+      out.push({ role: m.role, content: this.toOpenAIContent(m.content) });
+    }
+
+    return out;
+  }
+
+  /**
+   * Strip provider-native blocks that did not come from this provider.
+   *
+   * An opaque block is meaningful only to the provider that produced it —
+   * replaying an Anthropic thinking block here would at best be ignored and at
+   * worst rejected, so it is dropped rather than forwarded.
+   */
+  private toOpenAIContent(content: string | ContentPart[]): unknown {
+    if (typeof content === "string") return content;
+    const kept = content.filter((p) => p.type !== "provider_native" || p.provider === this.name);
+    if (kept.length === content.length) return content;
+    return kept;
   }
 
   // ── SSE streaming ───────────────────────────────────────────────
@@ -140,11 +208,12 @@ export class OpenAICompatibleProvider implements LLMProvider {
   private async handleSSE(
     body: ReadableStream<Uint8Array>,
     onDelta: (delta: StreamDelta) => void
-  ): Promise<{ message: Message; usage: TokenUsage }> {
+  ): Promise<ChatResult> {
     const reader = body.getReader();
     const decoder = new TextDecoder();
     let fullContent = "";
     let usage: TokenUsage = { promptTokens: 0, completionTokens: 0, totalTokens: 0 };
+    let finishReason: string | undefined;
     const toolCallsMap = new Map<number, { id: string; name: string; argsJson: string }>();
 
     let buffer = "";
@@ -165,6 +234,10 @@ export class OpenAICompatibleProvider implements LLMProvider {
           chunk = JSON.parse(payload);
         } catch {
           continue;
+        }
+
+        if (chunk.choices?.[0]?.finish_reason) {
+          finishReason = chunk.choices[0].finish_reason;
         }
 
         const delta = chunk.choices?.[0]?.delta;
@@ -205,11 +278,7 @@ export class OpenAICompatibleProvider implements LLMProvider {
         }
 
         if (chunk.usage) {
-          usage = {
-            promptTokens: chunk.usage.prompt_tokens,
-            completionTokens: chunk.usage.completion_tokens,
-            totalTokens: chunk.usage.total_tokens,
-          };
+          usage = toUsage(chunk.usage);
         }
       }
     }
@@ -230,17 +299,18 @@ export class OpenAICompatibleProvider implements LLMProvider {
         toolCalls: toolCalls.length ? toolCalls : undefined,
       },
       usage,
+      stopReason: mapFinishReason(finishReason),
     };
   }
 
   // ── Non-streaming response ──────────────────────────────────────
 
-  private parseResponse(data: OpenAIChatResponse): { message: Message; usage: TokenUsage } {
+  private parseResponse(data: OpenAIChatResponse): ChatResult {
     const choice = data.choices[0];
     const toolCalls = choice.message.tool_calls?.map((tc) => ({
       id: tc.id,
       name: tc.function.name,
-      arguments: JSON.parse(tc.function.arguments) as Record<string, unknown>,
+      arguments: parseArguments(tc.function.arguments),
     }));
 
     return {
@@ -249,19 +319,82 @@ export class OpenAICompatibleProvider implements LLMProvider {
         content: choice.message.content ?? "",
         toolCalls: toolCalls?.length ? toolCalls : undefined,
       },
-      usage: {
-        promptTokens: data.usage?.prompt_tokens ?? 0,
-        completionTokens: data.usage?.completion_tokens ?? 0,
-        totalTokens: data.usage?.total_tokens ?? 0,
-      },
+      usage: data.usage
+        ? toUsage(data.usage)
+        : { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
+      stopReason: mapFinishReason(choice.finish_reason),
     };
+  }
+}
+
+// ── Helpers ─────────────────────────────────────────────────────
+
+function systemToText(system?: string | SystemBlock[]): string | undefined {
+  if (!system) return undefined;
+  if (typeof system === "string") return system;
+  const text = system.map((b) => b.text).join("\n\n");
+  return text || undefined;
+}
+
+/**
+ * Tolerate malformed tool arguments.
+ *
+ * A model that emits invalid JSON here would otherwise throw inside response
+ * parsing and take down the whole turn, losing the rest of the response with
+ * it. An empty argument object reaches the tool, which reports a usable error.
+ */
+function parseArguments(raw: string): Record<string, unknown> {
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    return typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)
+      ? (parsed as Record<string, unknown>)
+      : {};
+  } catch {
+    return {};
+  }
+}
+
+function toUsage(usage: OpenAIUsage): TokenUsage {
+  return {
+    promptTokens: usage.prompt_tokens ?? 0,
+    completionTokens: usage.completion_tokens ?? 0,
+    totalTokens: usage.total_tokens ?? 0,
+    cacheReadTokens: usage.prompt_tokens_details?.cached_tokens ?? 0,
+    // This API reports cache reads but not writes, so the write figure stays
+    // absent rather than being reported as a confident zero.
+    cacheWriteTokens: undefined,
+  };
+}
+
+/** Map OpenAI's `finish_reason` onto the normalised set. */
+function mapFinishReason(reason?: string): ProviderStopReason {
+  switch (reason) {
+    case "stop":
+      return "end_turn";
+    case "length":
+      return "max_tokens";
+    case "tool_calls":
+    case "function_call":
+      return "tool_use";
+    case "content_filter":
+      return "refusal";
+    default:
+      return "unknown";
   }
 }
 
 // ── Response types ──────────────────────────────────────────────
 
+interface OpenAIUsage {
+  prompt_tokens?: number;
+  completion_tokens?: number;
+  total_tokens?: number;
+  prompt_tokens_details?: { cached_tokens?: number };
+}
+
 interface OpenAIChatResponse {
   choices: Array<{
+    finish_reason?: string;
     message: {
       role: string;
       content: string | null;
@@ -272,11 +405,12 @@ interface OpenAIChatResponse {
       }>;
     };
   }>;
-  usage?: { prompt_tokens: number; completion_tokens: number; total_tokens: number };
+  usage?: OpenAIUsage;
 }
 
 interface OpenAIStreamChunk {
   choices?: Array<{
+    finish_reason?: string;
     delta: {
       content?: string;
       tool_calls?: Array<{
@@ -286,5 +420,5 @@ interface OpenAIStreamChunk {
       }>;
     };
   }>;
-  usage?: { prompt_tokens: number; completion_tokens: number; total_tokens: number };
+  usage?: OpenAIUsage;
 }

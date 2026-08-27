@@ -1,6 +1,6 @@
 import type { ToolPlugin } from "@microagent/core";
-import { readdirSync, statSync } from "node:fs";
-import { resolve, join } from "node:path";
+import { readdir } from "node:fs/promises";
+import { resolve } from "node:path";
 
 export const listDirTool: ToolPlugin = {
   definition: {
@@ -16,12 +16,14 @@ export const listDirTool: ToolPlugin = {
   },
   async execute(args) {
     const dirPath = resolve(String(args.path));
-    const entries = readdirSync(dirPath);
+
+    // Async, and `withFileTypes` rather than a `statSync` per entry: the old
+    // version blocked the event loop for one syscall per file, which on a large
+    // or network-mounted directory stalled every other session in the process.
+    const entries = await readdir(dirPath, { withFileTypes: true });
+
     return entries
-      .map((name) => {
-        const stat = statSync(join(dirPath, name));
-        return `${stat.isDirectory() ? "d" : "f"} ${name}`;
-      })
+      .map((entry) => `${entry.isDirectory() ? "d" : "f"} ${entry.name}`)
       .join("\n");
   },
 };

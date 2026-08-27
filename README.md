@@ -4,7 +4,7 @@ A minimal AI agent built in TypeScript. A reference implementation showing how t
 
 > **[How It Works](docs/HOW_IT_WORKS.md)** — deep dive into the agent loop, provider abstraction, tool binding, MCP integration, and message protocol (with Mermaid diagrams).
 >
-> **[Rust Port Plan](docs/RUST_PORT_PLAN.md)** — the parallel Rust implementation in `rust/`: design decisions, deliberate deviations, and what porting turned up.
+> **[microagent-rust](https://github.com/emdzej/microagent-rust)** — a Rust implementation of the same agent, in its own repository. Interoperable: same config file, same token cache, same HTTP API, and it serves this repo's web UI build.
 
 ## Features
 
@@ -13,10 +13,18 @@ A minimal AI agent built in TypeScript. A reference implementation showing how t
 - **Multiple providers** — configure several providers at once, list models across all, switch with `provider/model` syntax
 - **Multimodal** — attach images via CLI (`/image`), web UI (upload/paste), or API
 - **Runtime model switching** — `/model provider/model` switches provider and model, persists to config
+- **Anthropic on Bedrock** — SigV4 via the ambient AWS credential chain, adaptive thinking, manual prompt-cache breakpoints
+- **Isolated sessions** — a conversation per caller, running concurrently, with TTL eviction and caps
+- **Typed run outcomes** — `stopReason` distinguishes a finished answer from one truncated by a round cap, budget, deadline, or output limit
+- **Budgets and cancellation** — token ceiling, wall-clock deadline, per-tool timeout, and an `AbortSignal` that reaches both the provider and the tools
+- **Tool policy** — a gate that can allow, rewrite, or deny a call before it runs, with the reason fed back to the model
 - **Plugin-based tool system** — built-in tools and MCP servers register through the same registry
-- **MCP client** — connect to any MCP server via stdio or HTTP
+- **MCP client** — stdio or HTTP, with connect timeouts, reconnection, and tools that report being offline instead of vanishing
+- **OIDC auth** — bearer JWT against the realm's JWKS, plus `/.well-known/microagent-config` so clients discover the IdP instead of hard-coding it
 - **Streaming** — SSE streaming in both CLI and web UI
-- **Usage stats** — token counts, request counts, tool call counts, elapsed time
+- **Structured output** — constrain a response to a JSON Schema and get a typed validation failure rather than an exception
+- **Audit trail** — structured JSON per tool call and per turn: correlation id, principal, stop reason, usage with cache tokens, tool arguments and results, and optionally the full prompt — with a redaction hook and size caps
+- **Usage stats** — token counts, cache reads/writes, request counts, tool call counts, elapsed time
 - **Docker ready** — single Dockerfile, docker-compose with mounted config
 
 ## Architecture
@@ -27,34 +35,21 @@ packages/
   server/     @microagent/server   Fastify HTTP API (REST + SSE streaming)
   cli/        @microagent/cli      Ink terminal UI + commander entry point
   web/        @microagent/web      Svelte 5 SPA (Tailwind CSS)
-
-rust/                                A second implementation, same design
-  crates/core/    microagent-core    LLM provider, tool registry, MCP client, agent loop
-  crates/server/  microagent-server  axum HTTP API (REST + SSE)
-  crates/cli/     microagent (bin)   clap + ratatui TUI
 ```
 
-There is also a **[Rust implementation](rust/README.md)** of the same agent,
-interoperable with this one: it reads the same config file and token cache, serves
-the same HTTP API, and hosts the same web UI build — optionally embedded, for a
-single binary with no Node runtime. See **[Rust Port Plan](docs/RUST_PORT_PLAN.md)**
-for the design decisions and the differences between the two.
+### The Rust implementation
 
-```bash
-pnpm rust:build              # cargo build --release
-pnpm rust:build:embed        # build the web UI, then embed it in the binary
-pnpm rust:test               # 166 tests
-pnpm rust:lint               # clippy -D warnings + rustfmt --check
-pnpm rust:chat               # interactive TUI
-pnpm rust:ask -- 'a question'
-pnpm rust:serve              # HTTP API on :3100
-pnpm rust:ui                 # API + web UI on :3200
-pnpm rust:wizard             # config wizard
-```
+A second implementation of the same agent lives in
+**[microagent-rust](https://github.com/emdzej/microagent-rust)** — same agent
+loop, provider abstraction, tool registry and MCP client, expressed in a language
+with very different constraints. It reads the same config file and Copilot token
+cache and serves the same HTTP API, so either can back the same front-end.
 
-Prebuilt binaries for Linux, macOS (Intel and Apple Silicon) and Windows are
-attached to each [release](../../releases), with SHA-256 checksums. They embed
-the web UI, so `microagent ui` works from a single file with no Node runtime.
+It also hosts **this repo's web UI build**: `packages/web/build` is what its
+`embed-web` feature bakes into a single binary with no Node runtime. That is the
+one dependency between the two repositories — its `scripts/sync-web.sh` copies a
+build from a checkout of this one. Prebuilt binaries with the UI embedded are
+attached to its releases.
 
 ```
 User ──► CLI (Ink)  ──► Agent ──► OpenAI-compatible API (Ollama/Copilot/...)
@@ -307,6 +302,262 @@ The legacy single-provider format is still supported for backward compatibility:
 pnpm chat -- -c microagent.config.json
 ```
 
+### Secrets
+
+An inline `apiKey` is fine for the CLI, where the config file is your own
+dotfile. For anything deployed, reference the secret instead of embedding it:
+
+```json
+{
+  "providers": [
+    { "type": "openai", "model": "gpt-4o", "apiKeyEnv": "OPENAI_API_KEY" },
+    { "type": "custom", "model": "m", "apiKeyFile": "/var/run/secrets/llm/api-key" }
+  ]
+}
+```
+
+`apiKeyFile` is how a mounted Kubernetes secret arrives. Exactly one of the
+three sources may be set. A named source that is missing or empty **fails at
+startup** — the alternative is a puzzling 401 from the provider much later, far
+from the cause.
+
+Set `"allowConfigWrites": false` (or `MICROAGENT_ALLOW_CONFIG_WRITES=false`) for
+a container with a read-only root filesystem, so a `POST /model` switches the
+model in memory without attempting a write that would crash the pod.
+
+### Session limits and per-caller limits
+
+```json
+{
+  "sessions": {
+    "maxSessions": 100,
+    "ttlMs": 1800000,
+    "maxTurnsPerSession": 100,
+    "maxMessagesPerSession": 2000
+  },
+  "limits": {
+    "requestsPerMinute": 60,
+    "tokensPerMinute": 200000,
+    "maxSessionsPerPrincipal": 5
+  }
+}
+```
+
+Sessions hold whatever the tools gathered — memory, and often personal data — so
+they expire on idle and can be closed explicitly. `limits` are enforced **per
+principal**, not per process: a process-wide limit lets the busiest caller set
+everyone else's ceiling.
+
+### Amazon Bedrock
+
+```json
+{
+  "providers": [
+    {
+      "type": "bedrock",
+      "model": "claude-opus-5",
+      "region": "eu-central-1",
+      "maxTokens": 8192,
+      "thinking": { "type": "adaptive" },
+      "effort": "high"
+    }
+  ]
+}
+```
+
+Credentials come from the ambient AWS chain, so IRSA works with no static keys
+anywhere in the config. Model ids are normalised to Bedrock's `anthropic.`
+prefix (`claude-opus-5` → `anthropic.claude-opus-5`); an already-qualified id or
+a cross-region inference profile (`us.anthropic.…`) is left exactly as written.
+
+Bedrock does no automatic prompt caching, so breakpoints have to be placed by
+hand or the whole prefix is re-billed every turn. Ask for them per session:
+
+```ts
+const session = agent.createSession({
+  cacheBreakpoints: { system: true, tools: true },
+});
+```
+
+Watch `cacheReadTokens` in `/stats` or on a run's `usage`. Zero cache reads
+across repeated runs is the one signal that something volatile has leaked into
+the prompt prefix — a regression that shows up as a cost increase with no
+functional symptom.
+
+### Audit trail
+
+One structured JSON record per line on stdout — what a log collector in a
+container already reads. Two record types:
+
+- **`tool_call`** — emitted as each call finishes: name, source server,
+  arguments, result, duration, error/denial outcome.
+- **`turn`** — emitted at turn end: principal, model, stop reason, rounds,
+  usage including cache tokens, every tool call, and the prompt.
+
+The per-call record exists because a turn can run for minutes across many
+rounds. Batching everything into the turn summary means nothing is observable
+while it happens, and a crash mid-turn loses every call already made — which is
+exactly the window worth having a trail for.
+
+```json
+{
+  "audit": {
+    "enabled": true,
+    "level": "io",
+    "maxFieldChars": 8192,
+    "perToolCall": true
+  }
+}
+```
+
+| `level` | Records |
+|---|---|
+| `metadata` *(default)* | Outcomes, tool names, counts, usage. No prompt, argument, or result text. |
+| `io` | Adds the user input, the model's response, and each tool call's arguments and result. |
+| `full` | Adds the whole message history as sent to the model. |
+
+**`metadata` is the default deliberately.** Prompts and tool results are the
+most sensitive data the agent handles — everything the tools gathered ends up in
+them — so content capture is always an explicit choice, and one with a retention
+policy attached.
+
+Every record for a turn shares one `correlationId`, which is also returned to
+the caller in the HTTP response. A complaint about a specific answer can
+therefore be traced to the tool calls that produced it, and onward to whatever
+those tools logged themselves.
+
+Two things are described rather than recorded: an inline base64 image becomes
+`image image/png (2.9 KB)`, and a provider-native block (Anthropic thinking)
+becomes `provider_native:bedrock`. The first would otherwise dominate the record
+at no forensic value; the second is opaque to core by contract and may be signed
+or encrypted.
+
+#### Redaction
+
+What counts as a secret is deployment-specific — which token formats, which
+customer identifiers, which internal hostnames — so core provides the hook and
+you provide the rules. It runs on every recorded string, including each one
+nested inside tool arguments, and before truncation so it always sees whole
+values:
+
+```ts
+await createServer({
+  config,
+  auditRedactor: (value, ctx) => {
+    // ctx.field is system | input | response | message | tool_arguments | tool_result
+    // ctx.toolName is set for tool fields
+    return value.replace(/sk-[A-Za-z0-9]+/g, "[redacted]");
+  },
+});
+```
+
+A redactor that throws fails closed — the field is recorded as
+`[redaction failed]` rather than leaking the value it could not scrub, and the
+turn continues. `maxFieldChars` caps every text field with a visible
+`… [truncated N chars]` marker, so a tool returning a 40MB log dump cannot put
+all of it into the audit stream.
+
+### MCP servers
+
+```json
+{
+  "mcpServers": [
+    {
+      "name": "kubernetes",
+      "transport": "http",
+      "url": "http://mcp-kubernetes:4000/mcp",
+      "headers": { "X-Tenant": "prod" },
+      "connectTimeoutMs": 15000,
+      "reconnect": { "enabled": true, "maxAttempts": 5, "maxDelayMs": 30000 }
+    }
+  ]
+}
+```
+
+Tools are namespaced by server (`kubernetes__get_pods`), and a residual name
+collision now raises instead of silently shadowing — the old behaviour left the
+model calling a tool that belonged to a different server with nothing in the
+logs to explain the result.
+
+A server that dies is reconnected with backoff. Meanwhile its tools stay
+*registered but unavailable*, so a call returns a clear "unavailable" result
+rather than the tool quietly vanishing from the list — otherwise the model sees
+a shorter tool set, works around the gap, and produces an answer that reads as
+complete while silently omitting whatever that server was for.
+
+Set `MICROAGENT_DISALLOW_STDIO_MCP=true` to reject the stdio transport outright.
+`StdioClientTransport` spawns a child process, which is the wrong shape in a
+hardened pod with a read-only root filesystem and dropped capabilities; HTTP to
+a sidecar fits better.
+
+## Embedding the agent
+
+`Agent` holds the shared, per-turn-stateless things — providers, the tool
+registry, MCP connections — and hands out `Session` objects that each own one
+conversation.
+
+```ts
+import { Agent, JsonAuditSink } from "@microagent/core";
+
+const agent = new Agent(config);
+await agent.init(config.mcpServers);
+
+// One JSON line per tool call and per turn. `config.audit.level` decides how
+// much content each carries; `metadata` (the default) carries none.
+agent.setAuditSink(new JsonAuditSink());
+agent.setAuditRedactor((value) => value.replace(/sk-[A-Za-z0-9]+/g, "[redacted]"));
+
+// Reject or bound a call before it runs. A denial becomes the tool's result, so
+// the model can adapt instead of stalling against a silent failure.
+agent.setToolPolicy({
+  check(call) {
+    if (call.arguments.allNamespaces) {
+      return { action: "deny", reason: "cluster-wide queries are out of scope" };
+    }
+    if (call.name === "logs" && !call.arguments.since) {
+      return { action: "rewrite", arguments: { ...call.arguments, since: "1h" } };
+    }
+    return { action: "allow" };
+  },
+});
+
+const session = agent.createSession({
+  principal,                       // owns the session
+  systemPrompt: "You investigate alerts.",
+  cacheBreakpoints: { system: true, tools: true },
+});
+
+const result = await session.run(
+  "Why did checkout latency spike?",
+  { onDelta: (d) => process.stdout.write(d.text ?? "") },
+  {
+    signal: controller.signal,
+    tokenBudget: 200_000,
+    deadlineMs: 120_000,
+    toolTimeoutMs: 30_000,
+    responseFormat: { type: "json_schema", schema: findingSchema },
+  },
+);
+
+if (result.stopReason !== "end_turn") {
+  // max_tool_rounds | budget_exhausted | deadline_exceeded | cancelled |
+  // refusal | max_tokens | error — four of these are truncations carrying
+  // plausible-looking text, so this branch is not optional.
+  console.warn(`incomplete: ${result.stopReason}`);
+}
+
+if (result.structured && !result.structured.ok) {
+  // A schema failure is a number to count and alert on, not an exception.
+  metrics.increment("schema_violation");
+}
+
+agent.closeSession(session.id);
+```
+
+`Agent.run()` still exists and still returns a plain `string`, backed by an
+implicit default session — the CLI really does have exactly one conversation.
+Use `runDetailed()` or a session when you need the outcome.
+
 ## Adding Tool Plugins
 
 Every tool — built-in or external — implements the same `ToolPlugin` interface:
@@ -344,12 +595,61 @@ agent.tools.register(myTool);
 
 ### Built-in tools
 
-| Tool | Description |
-|---|---|
-| `file_read` | Read file contents |
-| `file_write` | Write to file (creates dirs) |
-| `bash` | Execute shell command |
-| `list_directory` | List directory entries |
+Registered by `registerBuiltinTools` from the CLI package, so every command —
+including `serve` and `ui` — has all four. `@microagent/server` registers none
+itself; embedded standalone it starts with an empty registry.
+
+| Tool | Arguments | Description |
+|---|---|---|
+| `file_read` | `path` | Read file contents as utf-8 |
+| `file_write` | `path`, `content` | Write to file, creating parent directories |
+| `bash` | `command`, `cwd?` | Run a shell command; returns stdout, or `EXIT ERROR` with stdout/stderr on a non-zero exit |
+| `list_directory` | `path` | List entries, one `d `/`f ` prefixed line each |
+
+`bash` runs asynchronously and honours the run's cancellation: a
+`toolTimeoutMs`, a wall-clock deadline, or a client hanging up all terminate the
+command. It is spawned into its own process group so terminating reaps the whole
+tree, including the grandchildren of a compound command like `sleep 60 & wait`.
+Output is capped at 1MB, keeping what fits and appending a
+`[output truncated …]` marker rather than discarding everything captured.
+
+Shell resolution is unchanged (`/bin/sh -c` on POSIX, `cmd.exe` on Windows)
+despite the tool's name, so existing commands behave as before.
+
+### Confining filesystem access
+
+The built-in tools resolve whatever path they are given — for a local coding
+agent, reading a file outside the working directory is the point. On a
+multi-user server it is not: `file_read` will return any file the process can
+read, including the config file with an inline `apiKey`.
+
+That boundary is a policy decision, so it is opt-in rather than baked into the
+tools:
+
+```ts
+import { pathConfinementPolicy, denyToolsPolicy, composePolicies } from "@microagent/core";
+
+agent.setToolPolicy(
+  composePolicies([
+    denyToolsPolicy(["bash"], "shell access is disabled on this deployment"),
+    pathConfinementPolicy({ root: "/workspace" }),
+  ]),
+);
+```
+
+`pathConfinementPolicy` resolves symlinks on every component that exists, so a
+link inside the root pointing out of it is rejected — a check against the
+literal string would miss that. Allowed calls are **rewritten** to the absolute
+resolved path: the tools call `path.resolve()` themselves, and a policy that
+checked one path while the tool resolved another would be decoration.
+
+It is a boundary against a confused model, not against a local attacker: a
+symlink swapped between the check and the tool's `open` would still escape.
+Closing that needs `openat`/`O_NOFOLLOW`, which Node does not expose.
+
+`denyToolsPolicy` turns a capability off without unregistering the tool, so the
+model is told plainly why it cannot use it instead of silently working around a
+gap it cannot see.
 
 ### MCP tools
 
@@ -359,18 +659,51 @@ MCP server tools are auto-registered as `servername__toolname` when configured i
 
 Start with `pnpm serve` or `pnpm ui`.
 
-| Method | Endpoint | Description |
-|---|---|---|
-| `GET` | `/health` | Provider, tool count, uptime |
-| `GET` | `/tools` | All tool definitions |
-| `GET` | `/stats` | Token/request/tool usage |
-| `GET` | `/models` | List available models from all configured providers |
-| `GET` | `/model` | Get current model and provider |
-| `POST` | `/model` | Switch model `{ model: "provider/model" }` -> `{ provider, model, persisted }` |
-| `POST` | `/chat` | Sync chat `{ message, images? }` -> `{ response, toolCalls, stats }` |
-| `POST` | `/chat/stream` | SSE stream — events: `delta`, `tool_call`, `tool_result`, `complete`, `error` |
+| Method | Endpoint | Auth | Description |
+|---|---|---|---|
+| `GET` | `/health` | public | Provider, tool count, session count, MCP state, uptime |
+| `GET` | `/.well-known/microagent-config` | public | Which IdP to authenticate against (404 when auth is off) |
+| `GET` | `/tools` | yes | All tool definitions, with availability and source server |
+| `GET` | `/stats` | yes | Token/request/tool usage, including cache tokens |
+| `GET` | `/models` | yes | List available models from all configured providers |
+| `GET` | `/model` | yes | Get current model and provider |
+| `POST` | `/model` | yes | Switch model `{ model: "provider/model" }` -> `{ provider, model, persisted }` |
+| `POST` | `/sessions` | yes | Create a conversation `{ systemPrompt?, metadata? }` -> session |
+| `GET` | `/sessions` | yes | List **your own** sessions |
+| `GET` | `/sessions/:id` | yes | Session detail (turns, messages, usage) |
+| `DELETE` | `/sessions/:id` | yes | Close a session and drop its history |
+| `POST` | `/sessions/:id/messages` | yes | Run a turn in that session |
+| `POST` | `/sessions/:id/messages/stream` | yes | Same, as SSE |
+| `POST` | `/chat` | yes | Compatibility shim over an implicit per-caller session |
+| `POST` | `/chat/stream` | yes | SSE — events: `delta`, `tool_call`, `tool_result`, `tool_denied`, `complete`, `error` |
 
-Both `/chat` and `/chat/stream` accept an optional `images` array (data URIs or URLs) for multimodal messages.
+Every run route accepts the same body: `{ message, images?, maxToolRounds?, tokenBudget?, deadlineMs?, toolTimeoutMs?, maxTokens?, responseFormat? }`. `images` takes data URIs or URLs for multimodal messages.
+
+Responses carry the run's outcome, not just its text:
+
+```jsonc
+{
+  "response": "…",
+  "stopReason": "end_turn",   // or max_tool_rounds | budget_exhausted |
+                              // deadline_exceeded | cancelled | refusal |
+                              // max_tokens | error
+  "rounds": 2,
+  "usage": { "totalTokens": 812, "cacheReadTokens": 4096, "cacheWriteTokens": 0 },
+  "correlationId": "…",       // ties this turn to its audit record
+  "toolCalls": [ /* … */ ],
+  "stats": { /* … */ }
+}
+```
+
+`stopReason` matters: without it a caller cannot tell a finished answer from one
+truncated by the round cap, a token budget, or the model's own output limit.
+
+**Sessions are owned.** A session belongs to the principal that created it, and
+a request for someone else's session gets a `404` — the same answer as one that
+does not exist, because confirming that another subject's id is valid is itself
+a small leak. `/chat` is backed by an implicit session **per caller**; it
+previously appended to one process-wide conversation, so one caller's context
+and tool output ended up in the next caller's prompt.
 
 ```bash
 # Sync
@@ -447,6 +780,114 @@ while (true) {
 const models = await fetch(`${BASE}/models`).then((r) => r.json());
 const tools = await fetch(`${BASE}/tools`).then((r) => r.json());
 const stats2 = await fetch(`${BASE}/stats`).then((r) => r.json());
+```
+
+## Authentication
+
+Off by default — the CLI and a local `pnpm serve` need no token. Configure an
+`auth.oidc` block and the server requires a bearer JWT on every API route.
+
+```json
+{
+  "auth": {
+    "oidc": {
+      "issuer": "https://auth.example.com/realms/myproduct",
+      "audience": "microagent",
+      "clientIdHint": "microagent-cli",
+      "requiredScopes": []
+    }
+  }
+}
+```
+
+Or by environment variable, for a container with no config file:
+
+```bash
+MICROAGENT_OIDC_ISSUER=https://auth.example.com/realms/myproduct
+MICROAGENT_OIDC_AUDIENCE=microagent
+MICROAGENT_OIDC_CLIENT_ID=microagent-cli
+```
+
+Auth is enabled whenever an issuer is present, so a deployment can only lose
+authentication by asking for it (`auth.enabled: false`), never by forgetting a
+flag. Tokens are verified against the realm's JWKS, discovered from the issuer
+at startup — a bad issuer fails the process rather than turning every later
+request into a confusing 401. Verification checks, in order: the algorithm
+allowlist (`RS256`/`ES256`; `none` is never accepted and the token's own `alg`
+header never gets a say), the signing key by `kid`, exact `iss`, `aud`
+membership, `exp`/`nbf` with a 60s skew allowance, then optional `azp` and
+required scopes. Keys are cached and refetched on an unknown `kid` so rotation
+needs no restart, with a cooldown so an unknown-`kid` flood cannot turn every
+request into an outbound fetch.
+
+### Client discovery — `/.well-known/microagent-config`
+
+A client should not need the IdP's URL compiled into it. It asks the deployment
+where to authenticate and then runs the OAuth flow itself:
+
+```bash
+curl http://localhost:3100/.well-known/microagent-config
+```
+
+```json
+{
+  "issuer": "https://auth.example.com/realms/myproduct",
+  "audience": "microagent",
+  "scopes": [
+    "microagent:session:create",
+    "microagent:session:read",
+    "microagent:session:write",
+    "microagent:session:delete",
+    "microagent:model:read",
+    "microagent:model:write",
+    "microagent:tools:read"
+  ],
+  "authorization_endpoint": "https://auth.example.com/realms/myproduct/protocol/openid-connect/auth",
+  "token_endpoint": "https://auth.example.com/realms/myproduct/protocol/openid-connect/token",
+  "device_authorization_endpoint": "https://auth.example.com/realms/myproduct/protocol/openid-connect/auth/device",
+  "client_id_hint": "microagent-cli"
+}
+```
+
+The endpoint is public — a client has to read it *before* it has a token — and
+carries no secrets. When auth is disabled it returns **404** with
+`auth disabled on this deployment`, which a client can map to a "no token
+needed" sentinel; a `200` with blank fields would instead read like a
+misconfigured IdP.
+
+Why a microagent-specific path rather than reusing the OIDC one:
+`.well-known/openid-configuration` is the *IdP's* document, served by the IdP.
+This one is served by the agent and carries deployment-specific metadata — the
+scopes this API understands and the shared `client_id_hint` — that has no place
+in the IdP's response.
+
+`device_authorization_endpoint` is there so a CLI can drive the RFC 8628 device
+authorization grant: no browser redirect, no callback URL. Register one public,
+device-flow-enabled OAuth client at your IdP and publish its id as
+`clientIdHint`; every client of the deployment shares it, because the rendezvous
+party is the deployment, not the individual user. Browser apps should **not**
+use device flow — most IdPs do not enable CORS on the token endpoint for it —
+and should run auth-code + PKCE instead, passing the resulting access token
+through as a bearer.
+
+### Authorisation
+
+Authentication and authorisation are separate. By default each route requires
+its named scope (`ROUTE_SCOPES`, deny-by-default for anything unmapped). Replace
+the policy to enforce rules that are specific to your deployment — which
+environments or namespaces a caller may touch is domain knowledge that does not
+belong in a generic runtime:
+
+```ts
+import { createServer } from "@microagent/server";
+
+await createServer({
+  config,
+  authorize: (principal, request) =>
+    principal.groups.includes("platform-ops")
+      ? { allow: true }
+      : { allow: false, reason: "not a platform operator" },
+});
 ```
 
 ## Docker

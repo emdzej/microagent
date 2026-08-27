@@ -30,7 +30,7 @@ const userMessages: Message[] = [{ role: "user", content: "hi" }];
 /** Stream the given chunks through the provider, collecting deltas. */
 async function stream(payloads: unknown[]) {
   const deltas: StreamDelta[] = [];
-  const result = await provider().chat(userMessages, undefined, (d) => deltas.push(d));
+  const result = await provider().chat(userMessages, { onDelta: (d) => deltas.push(d) });
   return { deltas, ...result };
 }
 
