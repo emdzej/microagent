@@ -274,3 +274,39 @@ describe("response parsing", () => {
     }
   });
 });
+
+describe("model id forms this endpoint accepts", () => {
+  // Verified against eu-west-1. These assertions exist to stop a plausible
+  // "fix": an inference-profile prefix is required by the legacy
+  // bedrock-runtime API and rejected outright by the Messages endpoint used
+  // here, so the two surfaces disagree in opposite directions.
+  it("produces the bare anthropic. form, which is what this endpoint wants", () => {
+    expect(normalizeModelId("claude-opus-5")).toBe("anthropic.claude-opus-5");
+    expect(normalizeModelId("claude-haiku-4-5")).toBe("anthropic.claude-haiku-4-5");
+  });
+
+  it("does not add an inference-profile prefix, which this endpoint rejects", () => {
+    for (const model of ["claude-opus-5", "claude-sonnet-5", "claude-haiku-4-5"]) {
+      const normalized = normalizeModelId(model);
+      expect(normalized.startsWith("anthropic.")).toBe(true);
+      expect(normalized).not.toMatch(/^(?:eu|us|apac|global)\./);
+    }
+  });
+
+  it("still passes an explicitly qualified id through untouched", () => {
+    // A caller who has a profile id or an ARN knows something we do not.
+    for (const model of [
+      "eu.anthropic.claude-opus-5",
+      "arn:aws:bedrock:eu-west-1:1:inference-profile/x",
+    ]) {
+      expect(normalizeModelId(model)).toBe(model);
+    }
+  });
+
+  it("advertises the accepted form in listModels", async () => {
+    const provider = new BedrockProvider({ model: "claude-opus-5", region: "eu-west-1" });
+    for (const model of await provider.listModels()) {
+      expect(model.id.startsWith("anthropic.")).toBe(true);
+    }
+  });
+});

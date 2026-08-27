@@ -223,6 +223,20 @@ export class BedrockProvider implements LLMProvider {
  * Only a bare `claude-*` id is prefixed. Cross-region inference profiles
  * (`us.anthropic.…`) and any already-qualified id are left exactly as written —
  * guessing at those would break a deployment that had it right.
+ *
+ * A trap worth knowing before "fixing" this, verified against eu-west-1: the
+ * two Bedrock surfaces disagree about model ids, in opposite directions.
+ *
+ * - The **Messages endpoint this provider uses** accepts `anthropic.claude-opus-5`
+ *   and rejects `eu.anthropic.claude-opus-5` and `global.anthropic.…` with
+ *   "The model … does not exist". A bare `claude-opus-5` is rejected too.
+ * - The **legacy `bedrock-runtime` InvokeModel API** (what the AWS CLI drives) is
+ *   the mirror image: it rejects `anthropic.claude-opus-5` with "on-demand
+ *   throughput isn't supported" and requires an inference profile prefix.
+ *
+ * So an inference-profile prefix is right for the CLI and wrong here. Because
+ * this endpoint is region-scoped, geography follows the client's `awsRegion`
+ * rather than a prefix in the id.
  */
 export function normalizeModelId(model: string): string {
   if (!model) return model;
