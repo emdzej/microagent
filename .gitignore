@@ -147,5 +147,3 @@ vite.config.ts.timestamp-*
 .vite/
 .turbo
 
-# Rust
-rust/target/
